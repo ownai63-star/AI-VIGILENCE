@@ -1,0 +1,175 @@
+:root {
+    --primary: #00ffcc;
+    --bg: #0a0a0f;
+    --card-bg: #151520;
+    --text: #ffffff;
+    --sidebar-w: 300px;
+}
+
+body {
+    margin: 0;
+    font-family: 'Roboto', sans-serif;
+    background-color: var(--bg);
+    color: var(--text);
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+    background: #000;
+    border-bottom: 2px solid var(--primary);
+}
+
+.logo {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 1.5rem;
+    color: var(--primary);
+    font-weight: bold;
+}
+
+nav a {
+    color: var(--text);
+    text-decoration: none;
+    margin-left: 1.5rem;
+    font-weight: bold;
+    opacity: 0.7;
+}
+
+nav a.active {
+    opacity: 1;
+    color: var(--primary);
+}
+
+main {
+    display: flex;
+    min-height: calc(100vh - 70px);
+}
+
+.sidebar {
+    width: var(--sidebar-w);
+    padding: 2rem;
+    background: var(--card-bg);
+    border-right: 1px solid #333;
+}
+
+section h2 {
+    font-size: 1.1rem;
+    text-transform: uppercase;
+    color: #888;
+    margin-bottom: 1rem;
+}
+
+form input, form button, .filter-controls input, .filter-controls button {
+    width: 100%;
+    margin-bottom: 1rem;
+    padding: 10px;
+    border-radius: 5px;
+    border: none;
+    box-sizing: border-box;
+}
+
+form input, .filter-controls input {
+    background: #222;
+    color: #fff;
+}
+
+form button, .filter-controls button {
+    background: var(--primary);
+    color: #000;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.dashboard {
+    flex-grow: 1;
+    padding: 2rem;
+}
+
+.feed-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    gap: 2rem;
+}
+
+.feed-container {
+    background: var(--card-bg);
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid #333;
+}
+
+.feed-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px;
+    background: rgba(0,0,0,0.5);
+}
+
+.live-indicator {
+    color: #ff3333;
+    font-size: 0.8rem;
+    font-weight: bold;
+    animation: blink 1s infinite;
+}
+
+@keyframes blink {
+    50% { opacity: 0; }
+}
+
+.feed-container img {
+    width: 100%;
+    aspect-ratio: 16/9;
+    object-fit: cover;
+}
+
+.search-page {
+    flex-direction: column;
+    padding: 2rem;
+}
+
+.filter-controls {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 1.5rem;
+}
+
+.detection-card {
+    background: var(--card-bg);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: transform 0.2s;
+}
+
+.detection-card:hover {
+    transform: translateY(-5px);
+}
+
+.detection-image {
+    width: 100%;
+    aspect-ratio: 4/3;
+    object-fit: cover;
+}
+
+.detection-info {
+    padding: 1rem;
+}
+
+.detection-info h4 {
+    margin: 0;
+    color: var(--primary);
+}
+
+.detection-info p {
+    font-size: 0.9rem;
+    color: #ccc;
+    margin: 5px 0;
+}

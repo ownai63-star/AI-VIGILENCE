@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vigilance - Recognition History</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="logo">AI VIGILANCE</div>
+        <nav>
+            <a href="/">Dashboard</a>
+            <a href="/search" class="active">Search History</a>
+        </nav>
+    </header>
+
+    <main class="search-page">
+        <section class="filters">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2>Filters</h2>
+                <button id="clear-btn" style="background: #ff3333; color: white;">Clear History</button>
+            </div>
+            <div class="filter-controls">
+                <input type="text" id="name-search" placeholder="Search by name...">
+                <input type="datetime-local" id="start-time">
+                <input type="datetime-local" id="end-time">
+                <button id="search-btn">Search Text</button>
+            </div>
+            <div class="filter-controls" style="margin-top: 10px;">
+                <input type="file" id="image-search-input" accept="image/*">
+                <button id="search-image-btn" style="background: #00bcd4; color: black;">Search By Image</button>
+            </div>
+        </section>
+
+        <section class="results">
+            <h2>Detections</h2>
+            <div class="results-grid" id="results-grid">
+                <!-- Detections will be loaded here via JS -->
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

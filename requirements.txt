@@ -1,0 +1,12 @@
+ultralytics
+deep-sort-realtime
+facenet-pytorch
+torchvision
+fastapi
+uvicorn
+opencv-python
+numpy
+jinja2
+python-multipart
+onnxruntime
+pillow

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vigilance - Multi-Camera Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="logo">AI VIGILANCE</div>
+        <nav>
+            <a href="/" class="active">Dashboard</a>
+            <a href="/search">Search History</a>
+        </nav>
+    </header>
+
+    <main>
+        <div class="sidebar">
+            <section class="registration">
+                <h2>Register Person</h2>
+                <form id="register-form">
+                    <input type="text" name="name" placeholder="Full Name" required>
+                    <input type="file" name="file" accept="image/*" required>
+                    <button type="submit">Register</button>
+                </form>
+                <div id="reg-status"></div>
+            </section>
+
+            <section class="add-camera">
+                <h2>Add Camera</h2>
+                <form id="camera-form">
+                    <input type="text" name="camera_id" placeholder="Camera Name (e.g. Cam1)" required>
+                    <select name="camera_type" id="camera-type" style="width: 100%; margin-bottom: 1rem; padding: 10px; border-radius: 5px; border: none; background: #222; color: #fff;">
+                        <option value="webcam">Local Webcam</option>
+                        <option value="rtsp">RTSP Stream</option>
+                        <option value="ipwebcam">IP Webcam App (Android)</option>
+                        <option value="droidcam">DroidCam</option>
+                    </select>
+                    <input type="text" name="source" id="camera-source" placeholder="Camera Index (e.g. 0)" required>
+                    <button type="submit">Connect</button>
+                </form>
+            </section>
+            
+            <section class="manage-cameras" style="margin-top: 2rem;">
+                <h2>Manage Cameras</h2>
+                <ul id="active-cameras-list" style="list-style: none; padding: 0;">
+                </ul>
+            </section>
+        </div>
+
+        <div class="dashboard">
+            <div class="feed-grid" id="feed-grid">
+                {% for cam in cameras %}
+                <div class="feed-container" id="feed-{{ cam }}">
+                    <div class="feed-header">
+                        <h3>{{ cam }}</h3>
+                        <span class="live-indicator">LIVE</span>
+                    </div>
+                    <img src="/video_feed/{{ cam }}" alt="Live Feed">
+                </div>
+                {% endfor %}
+            </div>
+            {% if not cameras %}
+            <div class="no-cameras">
+                <p>No active cameras. Connect a camera to start monitoring.</p>
+            </div>
+            {% endif %}
+        </div>
+    </main>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
