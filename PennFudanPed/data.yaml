@@ -1,7 +1,0 @@
-
-path: D:\test\cam\PennFudanPed
-train: train_images
-val: valid_images
-
-names:
-  0: person

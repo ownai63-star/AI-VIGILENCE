@@ -3,41 +3,91 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Vigilance - Recognition History</title>
+    <title>AI Vigilance - Search & History</title>
     <link rel="stylesheet" href="/static/style.css">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        .mission-banner {
+            display: none;
+            background: linear-gradient(90deg, #ff3333, #ff6600);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            animation: pulse 1.5s infinite;
+        }
+        .mission-banner.hidden { display: none !important; }
+        #target-preview.hidden { display: none !important; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
+        .btn-stop { background: white; color: #ff3333; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .search-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .search-controls input[type=text] { flex: 1; min-width: 200px; }
+        .btn-primary { background: #00bcd4; color: black; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .btn-danger { background: #ff3333; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .section-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+    </style>
 </head>
 <body>
     <header>
         <div class="logo">AI VIGILANCE</div>
         <nav>
             <a href="/">Dashboard</a>
-            <a href="/search" class="active">Search History</a>
+            <a href="/search" class="active">Search & History</a>
         </nav>
     </header>
 
     <main class="search-page">
+        <!-- Active Mission Banner -->
+        <div id="mission-banner" class="mission-banner hidden">
+            <span id="mission-text">🔴 Searching for...</span>
+            <button class="btn-stop" id="stop-btn">■ Stop Search</button>
+        </div>
+
+        <!-- Target Person Preview -->
+        <div id="target-preview" class="hidden" style="display:flex;align-items:center;gap:16px;background:#1a1a2e;border:1px solid #00bcd4;border-radius:10px;padding:16px;margin-bottom:16px;">
+            <img id="target-photo" src="" alt="Target" style="width:100px;height:120px;object-fit:cover;border-radius:8px;border:2px solid #00bcd4;">
+            <div>
+                <p style="color:#00bcd4;font-size:0.8rem;margin:0 0 4px;">TARGET</p>
+                <h3 id="target-name" style="margin:0;color:white;font-size:1.3rem;"></h3>
+                <p style="color:#aaa;font-size:0.85rem;margin:4px 0 0;">🔴 Live detection active on all cameras</p>
+            </div>
+        </div>
+
         <section class="filters">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <h2>Filters</h2>
-                <button id="clear-btn" style="background: #ff3333; color: white;">Clear History</button>
+            <div class="section-title">
+                <h2>Search Person</h2>
+                <button id="clear-btn" class="btn-danger">🗑 Clear History</button>
             </div>
-            <div class="filter-controls">
-                <input type="text" id="name-search" placeholder="Search by name...">
+
+            <!-- Search by name (triggers live mission) -->
+            <div class="search-controls" style="margin-bottom: 12px;">
+                <input type="text" id="name-search" placeholder="Type a registered name (e.g. Gaurav)">
+                <button id="search-btn" class="btn-primary">🔍 Start Search</button>
+            </div>
+
+            <!-- Search by image -->
+            <div class="search-controls">
+                <input type="file" id="image-search-input" accept="image/*" style="flex:1;">
+                <button id="search-image-btn" class="btn-primary">📷 Search by Photo</button>
+            </div>
+
+            <!-- Date filters -->
+            <div class="filter-controls" style="margin-top: 12px;">
+                <label style="color:#aaa; font-size:0.85rem;">From</label>
                 <input type="datetime-local" id="start-time">
+                <label style="color:#aaa; font-size:0.85rem;">To</label>
                 <input type="datetime-local" id="end-time">
-                <button id="search-btn">Search Text</button>
-            </div>
-            <div class="filter-controls" style="margin-top: 10px;">
-                <input type="file" id="image-search-input" accept="image/*">
-                <button id="search-image-btn" style="background: #00bcd4; color: black;">Search By Image</button>
             </div>
         </section>
 
         <section class="results">
-            <h2>Detections</h2>
+            <h2>Detection History</h2>
             <div class="results-grid" id="results-grid">
-                <!-- Detections will be loaded here via JS -->
+                <p style="color:#666;">Enter a name above and click Start Search to find a person live, or browse past detections here.</p>
             </div>
         </section>
     </main>

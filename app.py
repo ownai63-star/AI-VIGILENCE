@@ -1,9 +1,8 @@
 import cv2
 import numpy as np
 import os
-import json
-import base64
-from fastapi import FastAPI, Request, File, UploadFile, Form, BackgroundTasks
+import shutil
+from fastapi import FastAPI, Request, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -15,366 +14,444 @@ from cameras.camera_manager import CameraManager
 import threading
 import time
 import urllib.parse
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def sanitize_rtsp_url(url):
     if not isinstance(url, str) or not url.startswith("rtsp://"):
         return url
-    # Find the last @ separating auth from host
     last_at = url.rfind("@")
     if last_at == -1:
         return url
-    
-    auth_part = str(url)[7:last_at] # type: ignore
+    auth_part = url[7:last_at]
     if ":" in auth_part:
         user, pwd = auth_part.split(":", 1)
         safe_pwd = urllib.parse.quote(pwd)
         return f"rtsp://{user}:{safe_pwd}{url[last_at:]}"
     return url
 
-# Ensure necessary directories exist
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
 os.makedirs("snapshots", exist_ok=True)
 os.makedirs("dataset", exist_ok=True)
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
+app.mount("/dataset", StaticFiles(directory="dataset"), name="dataset")
 templates = Jinja2Templates(directory="templates")
 
-# Initialize managers
 db_manager = DatabaseManager()
 detector = PersonDetector()
-# tracker must be initialized per-camera, not globally!
 recognizer = FaceRecognizer()
 camera_manager = CameraManager()
-
-# Load known faces from DB
 recognizer.load_known_faces(db_manager)
 
-# Global dictionary to keep track of processed data for display
-camera_results: Dict[str, Any] = {} # {camera_id: {tracks: [], last_frame: frame}}
-track_cache: Dict[tuple, Any] = {} # {(camera_id, track_id): {"name": str, "conf": float, "last_reid": float}}
-last_logged: Dict[tuple, Any] = {} # {(camera_id, track_id): {"snapshot": str, "name": str}}
+# ---------------------------------------------------------------------------
+# Shared state
+# ---------------------------------------------------------------------------
 
-def process_camera(camera_id):
-    """
-    Background thread to process frames for a specific camera.
-    """
-    # Each camera needs its own independent stateful tracker!
+# Per-camera: latest tracks for video overlay
+camera_results: Dict[str, Any] = {}
+results_lock = threading.Lock()  # Single shared lock for camera_results
+
+# Active search mission — set by /api/start_search, cleared by /api/stop_search
+# {person_id, name, encoding, found_track_ids: set, running: bool}
+active_search: Dict[str, Any] = {}
+active_search_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Passive camera processing — ONLY detection + tracking, NO recognition
+# ---------------------------------------------------------------------------
+
+def process_camera(camera_id: str):
+    """Background thread per camera: detection + tracking only."""
+    print(f"[process_camera] Thread started for: {camera_id}")
     tracker = ObjectTracker()
-    last_processed_id = -1
+    last_frame_id = -1
+    frame_count = 0
+    track_labels: Dict[int, tuple] = {}
+    # Cache face bboxes so we don't run MTCNN every single frame
+    face_bbox_cache: Dict[int, Any] = {}
+
     while True:
-        # Get frame with ID to avoid duplicate processing
         frame, frame_id = camera_manager.get_camera_frame_with_id(camera_id)
-        if frame is None or frame_id == last_processed_id:
+        if frame is None or frame_id == last_frame_id:
             time.sleep(0.01)
             continue
-            
-        last_processed_id = frame_id
-        
+        last_frame_id = frame_id
+        frame_count += 1
+
         try:
-            # 1. Detection
             detections = detector.detect(frame)
-            
-            # 2. Tracking
             tracks = tracker.update(detections, frame)
-            
-            # 3. Recognition & Logging
-            processed_tracks = []
-            now = time.time()
-            
-            for track in tracks:
-                bbox = [int(v) for v in track['bbox']]  # [x1, y1, x2, y2]
-                track_id = track['id']
-                cache_key = (camera_id, track_id)
-                
-                # Initialize cache for new track
-                if cache_key not in track_cache:
-                    track_cache[cache_key] = {"name": "Unknown", "conf": 0.0, "last_reid": 0}
 
-                cached = track_cache[cache_key]
-                
-                # Throttle recognition to prevent massive CPU spikes and thread the execution so DeepSORT physics tracker isn't blocked
-                if cached["name"] == "Unknown" and (now - float(cached["last_reid"])) > 2.0:
-                    cached["last_reid"] = now
-                    
-                    def do_recognize(f, b, c_key, t_reid, cam_id):
-                        n, c = recognizer.recognize(f, b)
-                        if n != "Unknown":
-                            with threading.Lock():
-                                track_cache[c_key]["name"] = n
-                                track_cache[c_key]["conf"] = c
-                                
-                            # Retroactively update database if it was already logged as Unknown
-                            if c_key in last_logged:
-                                prev_log = last_logged[c_key]
-                                if prev_log["name"] == "Unknown":
-                                    person_id = None
-                                    for p in db_manager.get_registered_persons():
-                                        if p[1] == n:
-                                            person_id = p[0]
-                                            break
-                                    db_manager.update_detection_person(cam_id, prev_log["snapshot"], person_id)
-                                    prev_log["name"] = n
-                                    print(f"Async updated track {t_reid} to {n} on {cam_id}")
+            h, w = frame.shape[:2]
 
-                    # run in background
-                    threading.Thread(target=do_recognize, args=(frame.copy(), bbox.copy(), cache_key, track_id, camera_id), daemon=True).start()
-                
-                track_data = {
-                    'id': track_id,
-                    'bbox': bbox,
-                    'name': cached["name"],
-                    'confidence': cached["conf"]
-                }
-                processed_tracks.append(track_data)
-                
-                # Take EXACTLY ONE snapshot per tracking session
-                if cache_key not in last_logged:
-                    timestamp = int(now)
-                    snapshot_name = f"snap_{camera_id}_{track_id}_{timestamp}.jpg"
-                    snapshot_path = f"snapshots/{snapshot_name}"
-                    
-                    cv2.imwrite(snapshot_path, frame)
-                    
-                    # Convert cached name to DB ID
-                    person_id = None
-                    if cached["name"] != "Unknown":
-                        for p in db_manager.get_registered_persons():
-                            if p[1] == cached["name"]:
-                                person_id = p[0]
-                                break
-                    
-                    db_manager.log_detection(person_id, camera_id, snapshot_path)
-                    last_logged[cache_key] = {"snapshot": snapshot_path, "name": cached["name"]}
-                    print(f"Logged new track {track_id} on {camera_id}")
+            # Prune stale labels and face cache
+            active_ids = {t["id"] for t in tracks}
+            track_labels   = {k: v for k, v in track_labels.items()   if k in active_ids}
+            face_bbox_cache = {k: v for k, v in face_bbox_cache.items() if k in active_ids}
 
-            with threading.Lock():
-                camera_results[camera_id] = {
-                    'tracks': processed_tracks,
-                    'last_frame': frame.copy()
-                }
+            processed = []
+            run_face = (frame_count % 5 == 0)  # refresh face bbox every 5 frames
+
+            for t in tracks:
+                # Clamp body bbox strictly to frame
+                bx1 = max(0, int(t["bbox"][0]))
+                by1 = max(0, int(t["bbox"][1]))
+                bx2 = min(w - 1, int(t["bbox"][2]))
+                by2 = min(h - 1, int(t["bbox"][3]))
+
+                # Skip degenerate or full-frame boxes
+                box_w = bx2 - bx1
+                box_h = by2 - by1
+                if box_w < 20 or box_h < 20:
+                    continue
+                if box_w > w * 0.95 or box_h > h * 0.95:
+                    continue
+
+                bbox = [bx1, by1, bx2, by2]
+
+                # Run MTCNN face detection periodically
+                if run_face:
+                    face_bbox = None
+                    try:
+                        crop = frame[by1:by2, bx1:bx2]
+                        if crop.size > 0:
+                            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                            boxes, _ = recognizer.mtcnn.detect(crop_rgb)
+                            if isinstance(boxes, np.ndarray) and len(boxes) > 0:
+                                fx1, fy1, fx2, fy2 = boxes[0]
+                                face_bbox = [
+                                    max(0,     bx1 + int(fx1)),
+                                    max(0,     by1 + int(fy1)),
+                                    min(w - 1, bx1 + int(fx2)),
+                                    min(h - 1, by1 + int(fy2))
+                                ]
+                                # Sanity: face must be smaller than body box
+                                fw = face_bbox[2] - face_bbox[0]
+                                fh = face_bbox[3] - face_bbox[1]
+                                if fw < 10 or fh < 10 or fw > box_w or fh > box_h:
+                                    face_bbox = None
+                    except Exception:
+                        face_bbox = None
+                    face_bbox_cache[t["id"]] = face_bbox
+                else:
+                    face_bbox = face_bbox_cache.get(t["id"])
+
+                name, conf = track_labels.get(t["id"], ("Unknown", 0.0))
+                processed.append({
+                    "id": t["id"],
+                    "bbox": bbox,
+                    "face_bbox": face_bbox,
+                    "name": name,
+                    "confidence": conf
+                })
+
+            with active_search_lock:
+                search = dict(active_search)
+
+            if search.get("running"):
+                for t in processed:
+                    track_key = (camera_id, t["id"])
+                    if track_key not in search.get("found_track_ids", set()):
+                        threading.Thread(
+                            target=recognition_worker,
+                            args=(frame.copy(), t["bbox"], t["id"], camera_id, track_labels),
+                            daemon=True
+                        ).start()
+
+            with results_lock:
+                camera_results[camera_id] = {"tracks": processed}
+
         except Exception as e:
-            print(f"Error in process_camera({camera_id}): {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[process_camera:{camera_id}] {e}")
+            import traceback; traceback.print_exc()
 
-        
         time.sleep(0.01)
+
+
+def recognition_worker(frame, bbox, track_id, camera_id, track_labels):
+    """
+    Background recognition for active search.
+    If person matches the target, take ONE snapshot, save to DB, mark as found.
+    """
+    with active_search_lock:
+        if not active_search.get("running"):
+            return
+        target_encoding = active_search.get("encoding")
+        target_name = active_search.get("name")
+        target_person_id = active_search.get("person_id")
+        found_ids = active_search.get("found_track_ids", set())
+        track_key = (camera_id, track_id)
+        if track_key in found_ids:
+            return
+
+    # Run face recognition
+    name, confidence = recognizer.recognize(frame, bbox)
+
+    if name == target_name and confidence > 0.4:
+        with active_search_lock:
+            if not active_search.get("running"):
+                return
+            if track_key in active_search.get("found_track_ids", set()):
+                return
+            active_search["found_track_ids"].add(track_key)
+
+        # Persist the label so it survives frame resets
+        track_labels[track_id] = (target_name, confidence)
+
+        # Take ONE snapshot
+        timestamp = int(time.time())
+        snap_name = f"snap_{camera_id}_{track_id}_{timestamp}.jpg"
+        snap_path = f"snapshots/{snap_name}"
+        cv2.imwrite(snap_path, frame)
+        db_manager.log_detection(target_person_id, camera_id, snap_path)
+        print(f"[ActiveSearch] Found {target_name} on {camera_id} — snapshot saved")
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     cameras = camera_manager.get_active_cameras()
     return templates.TemplateResponse("index.html", {"request": request, "cameras": cameras})
 
+
 @app.get("/search", response_class=HTMLResponse)
 async def search_page(request: Request):
     return templates.TemplateResponse("search.html", {"request": request})
 
+
 @app.post("/register")
 async def register_person(name: str = Form(...), file: UploadFile = File(...)):
-    # Save image
     img_dir = f"dataset/{name}"
     os.makedirs(img_dir, exist_ok=True)
     file_path = f"{img_dir}/{file.filename}"
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
-    
-    # Get encoding
+    with open(file_path, "wb") as buf:
+        buf.write(await file.read())
+
     image = cv2.imread(file_path)
     encoding = recognizer.get_encoding(image)
     if encoding is not None:
         db_manager.register_person(name, file_path, encoding.tobytes())
-        recognizer.load_known_faces(db_manager) # Reload
-        return {"status": "success", "message": f"Person {name} registered."}
-    return {"status": "error", "message": "Face not detected in image."}
+        recognizer.load_known_faces(db_manager)
+        return {"status": "success", "message": f"{name} registered."}
+    return {"status": "error", "message": "No face detected in the image."}
+
 
 @app.post("/add_camera")
 async def add_camera(camera_id: str = Form(...), camera_type: str = Form(...), source: str = Form(...)):
-    # Local Webcams use integers for cv2.VideoCapture
-    parsed_source = source
-    if camera_type == 'webcam':
+    parsed = source
+    if camera_type == "webcam":
         try:
-            parsed_source = int(source)
+            parsed = int(source)
         except ValueError:
-            pass # allow fallback to string if they didn't enter a number
-    elif camera_type == 'rtsp':
-        parsed_source = sanitize_rtsp_url(source)
-    elif camera_type == 'droidcam':
+            pass
+    elif camera_type == "rtsp":
+        parsed = sanitize_rtsp_url(source)
+    elif camera_type == "droidcam":
         if not source.startswith("http"):
-            if ":" not in source:
-                parsed_source = f"http://{source}:4747/video"
-            else:
-                parsed_source = f"http://{source}/video"
-    elif camera_type == 'ipwebcam':
+            parsed = f"http://{source}:4747/video" if ":" not in source else f"http://{source}/video"
+    elif camera_type == "ipwebcam":
         if not source.startswith("http"):
-            if ":" not in source:
-                parsed_source = f"http://{source}:8080/video"
-            else:
-                parsed_source = f"http://{source}/video"
-            
-    if camera_manager.add_camera(camera_id, parsed_source):
-        # Start background processing thread
-        t = threading.Thread(target=process_camera, args=(camera_id,), daemon=True)
-        t.start()
+            parsed = f"http://{source}:8080/video" if ":" not in source else f"http://{source}/video"
+
+    if camera_manager.add_camera(camera_id, parsed):
+        threading.Thread(target=process_camera, args=(camera_id,), daemon=True).start()
         return {"status": "success"}
-    return {"status": "error"}
+    return {"status": "error", "message": "Camera already exists or could not connect."}
+
 
 @app.post("/delete_camera")
 async def delete_camera(camera_id: str = Form(...)):
     if camera_manager.remove_camera(camera_id):
-        with threading.Lock():
-            camera_results.pop(camera_id, None)
+        camera_results.pop(camera_id, None)
         return {"status": "success"}
     return {"status": "error"}
+
 
 @app.get("/api/cameras")
 async def api_cameras():
     return camera_manager.get_active_cameras()
 
-def gen_frames(camera_id):
-    while True:
-        # Get raw low-latency real-time frame
-        frame = camera_manager.get_camera_frame(camera_id)
-        if frame is None:
-            time.sleep(0.1)
-            continue
 
-        # Quickly overlay latest available AI tracks (doesn't wait for background AI loop to finish this precise frame)
-        with threading.Lock():
-            if camera_id in camera_results:
-                data = camera_results[camera_id]
-                tracks = data.get('tracks', [])
-                
-                for track in tracks:
-                    bbox = track['bbox']
-                    name = str(track['name'])
-                    conf = float(track['confidence'])
-                    tid = str(track['id'])
-                    
-                    color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-                    label = f"{name} ({conf:.2f})" if name != "Unknown" else f"Person {tid}"
-                    
-                    cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2) # type: ignore
-                    cv2.putText(frame, label, (int(bbox[0]), int(bbox[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2) # type: ignore
-        
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
-        frame_bytes = buffer.tobytes()
-        
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-               
-        time.sleep(0.02) # Yield CPU to prevent starving threads, bounds roughly to 50fps max
-        # time.sleep(0.04) # ~25 FPS
+# ---------------------------------------------------------------------------
+# Active Search API
+# ---------------------------------------------------------------------------
 
-@app.get("/video_feed/{camera_id}")
-async def video_feed(camera_id: str):
-    return StreamingResponse(gen_frames(camera_id), media_type="multipart/x-mixed-replace; boundary=frame")
+@app.post("/api/start_search")
+async def start_search(name: str = Form(...)):
+    """Start an active face-search mission for the given person."""
+    persons = db_manager.get_registered_persons()
+    target = next((p for p in persons if p[1].lower() == name.lower()), None)
+    if target is None:
+        return {"status": "error", "message": f"'{name}' is not registered."}
 
-from typing import Optional
+    encoding = np.frombuffer(target[3], dtype=np.float32)
+    with active_search_lock:
+        active_search.clear()
+        active_search.update({
+            "running": True,
+            "person_id": target[0],
+            "name": target[1],
+            "encoding": encoding,
+            "found_track_ids": set()
+        })
+    print(f"[ActiveSearch] Mission started for: {target[1]}")
+    return {
+        "status": "success",
+        "message": f"Searching for {target[1]}",
+        "name": target[1],
+        "image_path": target[2]  # registered photo from dataset/
+    }
+
+
+@app.post("/api/stop_search")
+async def stop_search():
+    """Stop the active search mission."""
+    with active_search_lock:
+        active_search.clear()
+    print("[ActiveSearch] Mission stopped.")
+    return {"status": "success"}
+
+
+@app.get("/api/active_search")
+async def get_active_search():
+    """Return current active search target (if any)."""
+    with active_search_lock:
+        name = active_search.get("name")
+    return {"active": name is not None, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# History Search API
+# ---------------------------------------------------------------------------
 
 @app.get("/api/search")
 async def api_search(name: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None):
     results = db_manager.search_detections(name, start_time, end_time)
-    formatted = []
-    for r in results:
-        formatted.append({
-            "id": r[0],
-            "person_name": r[5] or "Unknown",
-            "camera_id": r[2],
-            "timestamp": r[3],
-            "image_path": r[4]
-        })
-    return formatted
+    return [{"id": r[0], "person_name": r[5] or "Unknown", "camera_id": r[2], "timestamp": r[3], "image_path": r[4]} for r in results]
 
-import shutil
-
-@app.post("/clear_history")
-async def clear_history():
-    # Clear database detections table
-    try:
-        with db_manager.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM detections')
-            conn.commit()
-    except Exception as e:
-        print(f"Error clearing DB: {e}")
-
-    # Delete snapshot files one-by-one (Windows-safe: skip locked files)
-    snaps_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
-    deleted = 0
-    failed = 0
-    if os.path.isdir(snaps_dir):
-        for fname in os.listdir(snaps_dir):
-            fpath = os.path.join(snaps_dir, fname)
-            try:
-                os.remove(fpath)
-                deleted += 1
-            except Exception:
-                failed += 1  # File is locked, skip it
-    
-    # Clear in-memory state so new detections start fresh
-    global last_logged, track_cache
-    last_logged.clear()
-    track_cache.clear()
-    
-    print(f"Clear history: deleted {deleted} files, skipped {failed} locked files")
-    return {"status": "success", "message": f"Cleared {deleted} records"}
 
 @app.post("/api/search_by_image")
 async def search_by_image(file: UploadFile = File(...)):
     img_bytes = await file.read()
     nparr = np.frombuffer(img_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
     encoding = recognizer.get_encoding(image)
     if encoding is None:
-        return [] # No face found
-        
-    # Find matching person
+        return []
+
     best_person_id = None
     min_dist = 1.0
     for p in db_manager.get_registered_persons():
         if p[3] is not None:
             db_enc = np.frombuffer(p[3], dtype=np.float32)
-            dist = np.linalg.norm(db_enc - encoding)
+            dist = float(np.linalg.norm(db_enc - encoding))
             if dist < min_dist:
                 min_dist = dist
                 best_person_id = p[0]
-                
+
     if best_person_id is None:
         return []
-        
-    # Fetch their detections
+
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT d.*, rp.name 
-            FROM detections d 
-            LEFT JOIN registered_persons rp ON d.person_id = rp.id
-            WHERE d.person_id = ?
-            ORDER BY d.timestamp DESC
-        ''', (best_person_id,))
+        cursor.execute('''SELECT d.*, rp.name FROM detections d
+                          LEFT JOIN registered_persons rp ON d.person_id = rp.id
+                          WHERE d.person_id = ? ORDER BY d.timestamp DESC''', (best_person_id,))
         results = cursor.fetchall()
-        
-    formatted = []
-    for r in results:
-        formatted.append({
-            "id": r[0],
-            "person_name": r[5] or "Unknown",
-            "camera_id": r[2],
-            "timestamp": r[3],
-            "image_path": r[4]
-        })
-    return formatted
+    return [{"id": r[0], "person_name": r[5] or "Unknown", "camera_id": r[2], "timestamp": r[3], "image_path": r[4]} for r in results]
+
+
+@app.post("/clear_history")
+async def clear_history():
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM detections")
+            conn.commit()
+    except Exception as e:
+        print(f"DB clear error: {e}")
+
+    snaps_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    deleted = 0
+    if os.path.isdir(snaps_dir):
+        for fname in os.listdir(snaps_dir):
+            try:
+                os.remove(os.path.join(snaps_dir, fname))
+                deleted += 1
+            except Exception:
+                pass
+
+    print(f"Cleared {deleted} snapshots.")
+    return {"status": "success", "message": f"Cleared {deleted} records"}
+
+
+# ---------------------------------------------------------------------------
+# Video streaming
+# ---------------------------------------------------------------------------
+
+def gen_frames(camera_id: str):
+    while True:
+        frame = camera_manager.get_camera_frame(camera_id)
+        if frame is None:
+            time.sleep(0.1)
+            continue
+
+        # Overlay latest tracks
+        with results_lock:
+            data = camera_results.get(camera_id, {})
+            tracks = list(data.get("tracks", []))
+
+        for track in tracks:
+            bbox = track["bbox"]
+            face_bbox = track.get("face_bbox")
+            name = str(track["name"])
+            conf = float(track["confidence"])
+            tid = str(track["id"])
+
+            # Body box — green if identified, orange if unknown
+            body_color = (0, 255, 0) if name != "Unknown" else (0, 165, 255)
+            label = f"{name} ({conf:.2f})" if name != "Unknown" else f"Person {tid}"
+            cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), body_color, 2)
+            cv2.putText(frame, label, (bbox[0], max(bbox[1] - 10, 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, body_color, 2)
+
+            # Face box — cyan, tighter box around the face
+            if face_bbox:
+                cv2.rectangle(frame, (face_bbox[0], face_bbox[1]), (face_bbox[2], face_bbox[3]), (255, 255, 0), 2)
+                cv2.putText(frame, "face", (face_bbox[0], max(face_bbox[1] - 6, 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
+        ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
+        time.sleep(0.02)
+
+
+@app.get("/video_feed/{camera_id}")
+async def video_feed(camera_id: str):
+    return StreamingResponse(gen_frames(camera_id), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
-    # Default: Add laptop webcam as Camera 0
     camera_manager.add_camera("Webcam", 0)
     threading.Thread(target=process_camera, args=("Webcam",), daemon=True).start()
-    
-    # Default: Add the provided RTSP Camera
+
     rtsp_url = sanitize_rtsp_url("rtsp://test:dei@12@12@10.7.16.48:554")
     camera_manager.add_camera("RTSP_Cam", rtsp_url)
     threading.Thread(target=process_camera, args=("RTSP_Cam",), daemon=True).start()

@@ -9,7 +9,7 @@ class PersonDetector:
         self.classes = [0]  # COCO class for person is 0
 
     def detect(self, frame):
-        results = self.model.predict(frame, classes=self.classes, verbose=False)
+        results = self.model.predict(frame, classes=self.classes, conf=0.5, verbose=False)
         detections = []
         for result in results:
             boxes = result.boxes
