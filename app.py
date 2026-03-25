@@ -20,7 +20,7 @@ from typing import Dict, Any, Optional
 # Helpers
 # ---------------------------------------------------------------------------
 
-def sanitize_rtsp_url(url):
+def sanitize_rtsp_url(url: str) -> str:
     if not isinstance(url, str) or not url.startswith("rtsp://"):
         return url
     last_at = url.rfind("@")
@@ -74,12 +74,12 @@ active_search_lock = threading.Lock()
 def process_camera(camera_id: str):
     """Background thread per camera: detection + tracking + recording."""
     print(f"[process_camera] Thread started for: {camera_id}")
-    tracker = ObjectTracker()
-    last_frame_id = -1
-    frame_count = 0
-    track_labels: Dict[int, tuple] = {}
+    tracker: Any = ObjectTracker()
+    last_frame_id: int = -1
+    frame_count: int = 0
+    track_labels: Dict[Any, tuple] = {}
     # Cache face bboxes so we don't run MTCNN every single frame
-    face_bbox_cache: Dict[int, Any] = {}
+    face_bbox_cache: Dict[Any, Any] = {}
     
     processed = []  # Keep track of last known detections for skipped frames
 
@@ -151,14 +151,14 @@ def process_camera(camera_id: str):
                     else:
                         face_bbox = face_bbox_cache.get(t["id"])
 
-                name, conf = track_labels.get(t["id"], ("Unknown", 0.0))
-                new_processed.append({
-                    "id": t["id"],
-                    "bbox": bbox,
-                    "face_bbox": face_bbox,
-                    "name": name,
-                    "confidence": conf
-                })
+                    name, conf = track_labels.get(t["id"], ("Unknown", 0.0))
+                    new_processed.append({
+                        "id": t["id"],
+                        "bbox": bbox,
+                        "face_bbox": face_bbox,
+                        "name": name,
+                        "confidence": conf
+                    })
 
             processed = new_processed
 
@@ -411,7 +411,7 @@ async def clear_history():
         print(f"DB clear error: {e}")
 
     snaps_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
-    deleted = 0
+    deleted: int = 0
     if os.path.isdir(snaps_dir):
         for fname in os.listdir(snaps_dir):
             try:
