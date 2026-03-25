@@ -32,6 +32,16 @@ class DatabaseManager:
                     FOREIGN KEY (person_id) REFERENCES registered_persons (id)
                 )
             ''')
+            # Table for video recordings
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS video_recordings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    camera_id TEXT,
+                    start_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    end_time DATETIME,
+                    file_path TEXT
+                )
+            ''')
             conn.commit()
 
     def register_person(self, name, image_path, encoding):
@@ -61,6 +71,57 @@ class DatabaseManager:
                 (person_id, camera_id, image_path)
             )
             conn.commit()
+
+    def start_recording(self, camera_id, file_path):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO video_recordings (camera_id, file_path, start_time) VALUES (?, ?, CURRENT_TIMESTAMP)',
+                (camera_id, file_path)
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def end_recording(self, record_id):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE video_recordings SET end_time = CURRENT_TIMESTAMP WHERE id = ?',
+                (record_id,)
+            )
+            conn.commit()
+
+    def search_recordings(self, camera_id=None, start_time=None, end_time=None):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = 'SELECT * FROM video_recordings WHERE 1=1'
+            params = []
+            if camera_id:
+                query += " AND camera_id = ?"
+                params.append(camera_id)
+            if start_time:
+                query += " AND start_time >= ?"
+                params.append(start_time)
+            if end_time:
+                query += " AND start_time <= ?"
+                params.append(end_time)
+            
+            query += " ORDER BY start_time DESC"
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+    def get_recording(self, record_id):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM video_recordings WHERE id = ?', (record_id,))
+            return cursor.fetchone()
+
+    def delete_recording(self, record_id):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM video_recordings WHERE id = ?', (record_id,))
+            conn.commit()
+
 
     def get_registered_persons(self):
         with self.get_connection() as conn:

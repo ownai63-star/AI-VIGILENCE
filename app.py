@@ -39,11 +39,13 @@ def sanitize_rtsp_url(url):
 
 os.makedirs("snapshots", exist_ok=True)
 os.makedirs("dataset", exist_ok=True)
+os.makedirs("recordings", exist_ok=True)
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
 app.mount("/dataset", StaticFiles(directory="dataset"), name="dataset")
+app.mount("/recordings", StaticFiles(directory="recordings"), name="recordings")
 templates = Jinja2Templates(directory="templates")
 
 db_manager = DatabaseManager()
@@ -70,7 +72,7 @@ active_search_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def process_camera(camera_id: str):
-    """Background thread per camera: detection + tracking only."""
+    """Background thread per camera: detection + tracking + recording."""
     print(f"[process_camera] Thread started for: {camera_id}")
     tracker = ObjectTracker()
     last_frame_id = -1
@@ -78,6 +80,8 @@ def process_camera(camera_id: str):
     track_labels: Dict[int, tuple] = {}
     # Cache face bboxes so we don't run MTCNN every single frame
     face_bbox_cache: Dict[int, Any] = {}
+    
+    processed = []  # Keep track of last known detections for skipped frames
 
     while True:
         frame, frame_id = camera_manager.get_camera_frame_with_id(camera_id)
@@ -88,65 +92,67 @@ def process_camera(camera_id: str):
         frame_count += 1
 
         try:
-            detections = detector.detect(frame)
-            tracks = tracker.update(detections, frame)
-
             h, w = frame.shape[:2]
 
+            # Run detection + tracking only every 5 frames
+            if frame_count % 5 == 1:
+                detections = detector.detect(frame)
+                tracks = tracker.update(detections, frame)
+
             # Prune stale labels and face cache
-            active_ids = {t["id"] for t in tracks}
-            track_labels   = {k: v for k, v in track_labels.items()   if k in active_ids}
-            face_bbox_cache = {k: v for k, v in face_bbox_cache.items() if k in active_ids}
+                active_ids = {t["id"] for t in tracks}
+                track_labels   = {k: v for k, v in track_labels.items()   if k in active_ids}
+                face_bbox_cache = {k: v for k, v in face_bbox_cache.items() if k in active_ids}
 
-            processed = []
-            run_face = (frame_count % 5 == 0)  # refresh face bbox every 5 frames
+                new_processed = []
+                run_face = (frame_count % 10 == 1)  # refresh face bbox every 10 frames (6 times a sec)
 
-            for t in tracks:
-                # Clamp body bbox strictly to frame
-                bx1 = max(0, int(t["bbox"][0]))
-                by1 = max(0, int(t["bbox"][1]))
-                bx2 = min(w - 1, int(t["bbox"][2]))
-                by2 = min(h - 1, int(t["bbox"][3]))
+                for t in tracks:
+                    # Clamp body bbox strictly to frame
+                    bx1 = max(0, int(t["bbox"][0]))
+                    by1 = max(0, int(t["bbox"][1]))
+                    bx2 = min(w - 1, int(t["bbox"][2]))
+                    by2 = min(h - 1, int(t["bbox"][3]))
 
-                # Skip degenerate or full-frame boxes
-                box_w = bx2 - bx1
-                box_h = by2 - by1
-                if box_w < 20 or box_h < 20:
-                    continue
-                if box_w > w * 0.95 or box_h > h * 0.95:
-                    continue
+                    # Skip degenerate or full-frame boxes
+                    box_w = bx2 - bx1
+                    box_h = by2 - by1
+                    if box_w < 20 or box_h < 20:
+                        continue
+                    if box_w > w * 0.95 or box_h > h * 0.95:
+                        continue
 
-                bbox = [bx1, by1, bx2, by2]
+                    bbox = [bx1, by1, bx2, by2]
 
-                # Run MTCNN face detection periodically
-                if run_face:
-                    face_bbox = None
-                    try:
-                        crop = frame[by1:by2, bx1:bx2]
-                        if crop.size > 0:
-                            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                            boxes, _ = recognizer.mtcnn.detect(crop_rgb)
-                            if isinstance(boxes, np.ndarray) and len(boxes) > 0:
-                                fx1, fy1, fx2, fy2 = boxes[0]
-                                face_bbox = [
-                                    max(0,     bx1 + int(fx1)),
-                                    max(0,     by1 + int(fy1)),
-                                    min(w - 1, bx1 + int(fx2)),
-                                    min(h - 1, by1 + int(fy2))
-                                ]
-                                # Sanity: face must be smaller than body box
-                                fw = face_bbox[2] - face_bbox[0]
-                                fh = face_bbox[3] - face_bbox[1]
-                                if fw < 10 or fh < 10 or fw > box_w or fh > box_h:
-                                    face_bbox = None
-                    except Exception:
+                    # Run MTCNN face detection periodically
+                    if run_face:
                         face_bbox = None
-                    face_bbox_cache[t["id"]] = face_bbox
-                else:
-                    face_bbox = face_bbox_cache.get(t["id"])
+                        try:
+                            crop = frame[by1:by2, bx1:bx2]
+                            if crop.size > 0:
+                                crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                                boxes, _ = recognizer.mtcnn.detect(crop_rgb)
+                                if isinstance(boxes, np.ndarray) and len(boxes) > 0:
+                                    fx1, fy1, fx2, fy2 = boxes[0]
+                                    face_bbox = [
+                                        max(0,     bx1 + int(fx1)),
+                                        max(0,     by1 + int(fy1)),
+                                        min(w - 1, bx1 + int(fx2)),
+                                        min(h - 1, by1 + int(fy2))
+                                    ]
+                                    # Sanity: face must be smaller than body box
+                                    fw = face_bbox[2] - face_bbox[0]
+                                    fh = face_bbox[3] - face_bbox[1]
+                                    if fw < 10 or fh < 10 or fw > box_w or fh > box_h:
+                                        face_bbox = None
+                        except Exception:
+                            face_bbox = None
+                        face_bbox_cache[t["id"]] = face_bbox
+                    else:
+                        face_bbox = face_bbox_cache.get(t["id"])
 
                 name, conf = track_labels.get(t["id"], ("Unknown", 0.0))
-                processed.append({
+                new_processed.append({
                     "id": t["id"],
                     "bbox": bbox,
                     "face_bbox": face_bbox,
@@ -154,33 +160,56 @@ def process_camera(camera_id: str):
                     "confidence": conf
                 })
 
+            processed = new_processed
+
             with active_search_lock:
                 search = dict(active_search)
 
-            if search.get("running"):
+            if search.get("running") and run_face:
                 for t in processed:
                     track_key = (camera_id, t["id"])
                     if track_key not in search.get("found_track_ids", set()):
-                        threading.Thread(
-                            target=recognition_worker,
-                            args=(frame.copy(), t["bbox"], t["id"], camera_id, track_labels),
-                            daemon=True
-                        ).start()
+                        if t.get("face_bbox") is not None:
+                            threading.Thread(
+                                target=recognition_worker,
+                                args=(frame.copy(), t["face_bbox"], t["id"], camera_id, track_labels),
+                                daemon=True
+                            ).start()
 
+            # Overlay rendering MUST happen for every frame to provide perfectly synced stream
+            record_frame = frame.copy()
+            for t in processed:
+                bx1, by1, bx2, by2 = t["bbox"]
+                face_bbox = t.get("face_bbox")
+                name = str(t["name"])
+                conf = float(t["confidence"])
+                tid = str(t["id"])
+
+                body_color = (0, 255, 0) if name != "Unknown" else (0, 165, 255)
+                label = f"{name} ({conf:.2f})" if name != "Unknown" else f"Person {tid}"
+                cv2.rectangle(record_frame, (bx1, by1), (bx2, by2), body_color, 2)
+                cv2.putText(record_frame, label, (bx1, max(by1 - 10, 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, body_color, 2)
+
+                if face_bbox:
+                    cv2.rectangle(record_frame, (face_bbox[0], face_bbox[1]), (face_bbox[2], face_bbox[3]), (255, 255, 0), 2)
+                    cv2.putText(record_frame, "face", (face_bbox[0], max(face_bbox[1] - 6, 10)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
+            # Output perfectly synchronized frame to the live feed
             with results_lock:
-                camera_results[camera_id] = {"tracks": processed}
+                camera_results[camera_id] = {"rendered_frame": record_frame, "frame_id": frame_id, "tracks": processed}
 
         except Exception as e:
             print(f"[process_camera:{camera_id}] {e}")
             import traceback; traceback.print_exc()
 
-        time.sleep(0.01)
+        # Removed forced 0.01s sleep to allow maximum unrestricted 60FPS loop speed
 
 
-def recognition_worker(frame, bbox, track_id, camera_id, track_labels):
+def recognition_worker(frame, face_bbox, track_id, camera_id, track_labels):
     """
-    Background recognition for active search.
-    If person matches the target, take ONE snapshot, save to DB, mark as found.
+    Background recognition for active search using exact face bbox.
     """
     with active_search_lock:
         if not active_search.get("running"):
@@ -193,8 +222,8 @@ def recognition_worker(frame, bbox, track_id, camera_id, track_labels):
         if track_key in found_ids:
             return
 
-    # Run face recognition
-    name, confidence = recognizer.recognize(frame, bbox)
+    # Run face recognition on the perfectly snapped face box
+    name, confidence = recognizer.recognize(frame, face_bbox)
 
     if name == target_name and confidence > 0.4:
         with active_search_lock:
@@ -229,7 +258,6 @@ async def index(request: Request):
 @app.get("/search", response_class=HTMLResponse)
 async def search_page(request: Request):
     return templates.TemplateResponse("search.html", {"request": request})
-
 
 @app.post("/register")
 async def register_person(name: str = Form(...), file: UploadFile = File(...)):
@@ -341,7 +369,6 @@ async def api_search(name: Optional[str] = None, start_time: Optional[str] = Non
     results = db_manager.search_detections(name, start_time, end_time)
     return [{"id": r[0], "person_name": r[5] or "Unknown", "camera_id": r[2], "timestamp": r[3], "image_path": r[4]} for r in results]
 
-
 @app.post("/api/search_by_image")
 async def search_by_image(file: UploadFile = File(...)):
     img_bytes = await file.read()
@@ -402,40 +429,21 @@ async def clear_history():
 # ---------------------------------------------------------------------------
 
 def gen_frames(camera_id: str):
+    last_sent_id = -1
     while True:
-        frame = camera_manager.get_camera_frame(camera_id)
-        if frame is None:
-            time.sleep(0.1)
-            continue
-
-        # Overlay latest tracks
         with results_lock:
             data = camera_results.get(camera_id, {})
-            tracks = list(data.get("tracks", []))
+            frame = data.get("rendered_frame")
+            frame_id = data.get("frame_id", -1)
+            
+        if frame is None or frame_id == last_sent_id:
+            time.sleep(0.005)  # 5ms check loop
+            continue
+            
+        last_sent_id = frame_id
 
-        for track in tracks:
-            bbox = track["bbox"]
-            face_bbox = track.get("face_bbox")
-            name = str(track["name"])
-            conf = float(track["confidence"])
-            tid = str(track["id"])
-
-            # Body box — green if identified, orange if unknown
-            body_color = (0, 255, 0) if name != "Unknown" else (0, 165, 255)
-            label = f"{name} ({conf:.2f})" if name != "Unknown" else f"Person {tid}"
-            cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), body_color, 2)
-            cv2.putText(frame, label, (bbox[0], max(bbox[1] - 10, 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, body_color, 2)
-
-            # Face box — cyan, tighter box around the face
-            if face_bbox:
-                cv2.rectangle(frame, (face_bbox[0], face_bbox[1]), (face_bbox[2], face_bbox[3]), (255, 255, 0), 2)
-                cv2.putText(frame, "face", (face_bbox[0], max(face_bbox[1] - 6, 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-
-        ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+        ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
-        time.sleep(0.02)
 
 
 @app.get("/video_feed/{camera_id}")

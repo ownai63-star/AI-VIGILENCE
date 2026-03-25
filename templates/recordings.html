@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vigilance - Recordings</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        .search-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 20px;}
+        .search-controls input[type=text] { flex: 1; min-width: 200px; padding: 10px; border-radius: 5px; border: 1px solid #333; background: #222; color: white;}
+        .filter-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 20px;}
+        .filter-controls input { padding: 10px; border-radius: 5px; border: 1px solid #333; background: #222; color: white;}
+        .btn-primary { background: #00bcd4; color: black; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .recording-card { background: #1a1a2e; border: 1px solid #333; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+        .recording-card video { width: 100%; height: auto; outline: none; }
+        .recording-info { padding: 15px; }
+        .recording-info h4 { margin: 0 0 10px 0; color: #00bcd4; font-size: 1.1rem; }
+        .recording-info p { margin: 5px 0; color: #aaa; font-size: 0.9rem; }
+        .results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">AI VIGILANCE</div>
+        <nav>
+            <a href="/">Dashboard</a>
+            <a href="/search">Search & History</a>
+            <a href="/recordings_page" class="active">Recordings</a>
+        </nav>
+    </header>
+
+    <main class="search-page">
+        <section class="filters">
+            <div class="section-title">
+                <h2>Video Recordings</h2>
+            </div>
+            <div class="search-controls">
+                <input type="text" id="camera-search" placeholder="Filter by Camera ID (e.g. Webcam)">
+                <button id="search-recordings-btn" class="btn-primary">🔍 Load Recordings</button>
+            </div>
+            <div class="filter-controls">
+                <label style="color:#aaa; font-size:0.85rem;">From</label>
+                <input type="datetime-local" id="rec-start-time">
+                <label style="color:#aaa; font-size:0.85rem;">To</label>
+                <input type="datetime-local" id="rec-end-time">
+            </div>
+        </section>
+
+        <section class="results">
+            <div class="results-grid" id="recordings-grid">
+                <p style="color:#666;">Click "Load Recordings" to view saved video feeds.</p>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const searchBtn = document.getElementById('search-recordings-btn');
+            const grid = document.getElementById('recordings-grid');
+
+            const fetchRecordings = async () => {
+                searchBtn.innerText = 'Loading...';
+                searchBtn.disabled = true;
+
+                const cam = document.getElementById('camera-search').value.trim();
+                const start = document.getElementById('rec-start-time').value;
+                const end = document.getElementById('rec-end-time').value;
+
+                const params = new URLSearchParams();
+                if (cam) params.append('camera_id', cam);
+                if (start) params.append('start_time', start);
+                if (end) params.append('end_time', end);
+
+                try {
+                    const res = await fetch(`/api/recordings?${params}`);
+                    const data = await res.json();
+                    
+                    if (!data || data.length === 0) {
+                        grid.innerHTML = '<p style="color:#666;padding:1rem;">No recordings found.</p>';
+                    } else {
+                        grid.innerHTML = data.map(r => `
+                            <div class="recording-card">
+                                <video controls preload="metadata">
+                                    <source src="/${r.file_path}" type="video/mp4">
+                                    Your browser does not support the video tag.
+                                </video>
+                                <div class="recording-info">
+                                    <h4>🎥 ${r.camera_id}</h4>
+                                    <p><b>Start:</b> ${new Date(r.start_time).toLocaleString()}</p>
+                                    <p><b>End:</b> ${r.end_time ? new Date(r.end_time).toLocaleString() : 'Ongoing...'}</p>
+                                    <p>
+                                        <a href="#" onclick="deleteRecording(${r.id}); return false;" style="color:#ff3333;text-decoration:none;">🗑 Delete</a>
+                                    </p>
+                                </div>
+                            </div>
+                        `).join('');
+                    }
+                } catch (e) {
+                    grid.innerHTML = '<p style="color:#ff3333;padding:1rem;">Error loading recordings.</p>';
+                }
+
+                searchBtn.innerText = '🔍 Load Recordings';
+                searchBtn.disabled = false;
+            };
+
+            searchBtn.addEventListener('click', fetchRecordings);
+            fetchRecordings();
+        });
+
+        window.deleteRecording = async (id) => {
+            if (!confirm('Are you sure you want to delete this video recording?')) return;
+            try {
+                const res = await fetch(`/api/recordings/${id}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    document.getElementById('search-recordings-btn').click(); // refresh
+                } else {
+                    alert(data.message || 'Error deleting recording');
+                }
+            } catch (e) {
+                alert('Failed to delete recording');
+            }
+        };
+    </script>
+</body>
+</html>

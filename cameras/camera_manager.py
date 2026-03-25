@@ -1,6 +1,10 @@
 import cv2
 import threading
 import time
+import os
+
+# Force OpenCV to use UDP and drop delay for RTSP streams
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;nobuffer|flags;low_delay"
 
 class CameraHandler:
     def __init__(self, camera_id, source):
@@ -16,16 +20,23 @@ class CameraHandler:
         self.thread.start()
 
     def _update(self):
+        fails = 0
         while self.running:
             ret, frame = self.cap.read()
             if not ret:
-                # Reconnect logic for RTSP
-                self.cap.release()
-                time.sleep(2)
-                self.cap = cv2.VideoCapture(self.source)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                fails += 1
+                if fails > 30:  # Allow 30 retries (approx 1 second interval) before giving up
+                    # Reconnect logic for RTSP
+                    self.cap.release()
+                    time.sleep(1)
+                    self.cap = cv2.VideoCapture(self.source)
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    fails = 0
+                else:
+                    time.sleep(0.05)
                 continue
             
+            fails = 0
             with self.lock:
                 self.frame = frame
                 self.frame_id += 1

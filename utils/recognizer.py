@@ -25,46 +25,34 @@ class FaceRecognizer:
                 self.known_face_encodings.append(encoding)
                 self.known_face_names.append(person[1])
 
-    def recognize(self, frame, bbox):
+    def recognize(self, frame, face_bbox):
         """
         frame: full color frame
-        bbox: [x1, y1, x2, y2]
+        face_bbox: [x1, y1, x2, y2] tight face bounding box
         """
-        # Crop the person using the bbox to isolate them before face detection
-        x1, y1, x2, y2 = bbox
-        person_crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
-        
-        if person_crop.size == 0:
+        if not face_bbox:
             return "Unknown", 0.0
 
-        # Convert to RGB for MTCNN
-        person_rgb = cv2.cvtColor(person_crop, cv2.COLOR_BGR2RGB)
+        fx1, fy1, fx2, fy2 = face_bbox
+        face_crop = frame[max(0, fy1):max(0, fy2), max(0, fx1):max(0, fx2)]
         
-        # Detect face in the isolated person crop
-        boxes, _ = self.mtcnn.detect(person_rgb)
-        
-        if isinstance(boxes, np.ndarray) and len(boxes) > 0:
-            # Get the first face
-            fx1, fy1, fx2, fy2 = [int(b) for b in boxes[0]]
-            face_crop = person_rgb[max(0, fy1):max(0, fy2), max(0, fx1):max(0, fx2)]
+        if face_crop.size > 0:
+            # Convert to RGB for Resnet processing
+            face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+            face_resized = cv2.resize(face_rgb, (160, 160))
+            face_tensor = torch.tensor(np.transpose(face_resized, (2, 0, 1))).float().unsqueeze(0).to(self.device)
+            face_tensor = (face_tensor - 127.5) / 128.0
             
-            if face_crop.size > 0:
-                # Resize for resnet (typically 160x160)
-                face_resized = cv2.resize(face_crop, (160, 160))
-                # Normalize and convert to tensor
-                face_tensor = torch.tensor(np.transpose(face_resized, (2, 0, 1))).float().unsqueeze(0).to(self.device)
-                face_tensor = (face_tensor - 127.5) / 128.0
-                
-                with torch.no_grad():
-                    embedding = self.resnet(face_tensor).cpu().numpy()[0]
-                
-                if self.known_face_encodings:
-                    distances = np.linalg.norm(self.known_face_encodings - embedding, axis=1)
-                    min_idx = np.argmin(distances)
-                    if distances[min_idx] < 1.0: # Threshold stringency (0.8 - 1.2 is typical)
-                        name = self.known_face_names[min_idx]
-                        confidence = 1 - (distances[min_idx] / 2.0)
-                        return name, float(confidence)
+            with torch.no_grad():
+                embedding = self.resnet(face_tensor).cpu().numpy()[0]
+            
+            if self.known_face_encodings:
+                distances = np.linalg.norm(self.known_face_encodings - embedding, axis=1)
+                min_idx = np.argmin(distances)
+                if distances[min_idx] < 1.0: # Threshold stringency (0.8 - 1.2 is typical)
+                    name = self.known_face_names[min_idx]
+                    confidence = 1 - (distances[min_idx] / 2.0)
+                    return name, float(confidence)
                 
         return "Unknown", 0.0
 

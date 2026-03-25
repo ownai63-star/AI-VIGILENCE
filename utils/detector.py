@@ -9,6 +9,7 @@ class PersonDetector:
         self.classes = [0]  # COCO class for person is 0
 
     def detect(self, frame):
+        # Default conf to 0.5 and default imgsz to prevent false positive tracking
         results = self.model.predict(frame, classes=self.classes, conf=0.5, verbose=False)
         detections = []
         for result in results:
