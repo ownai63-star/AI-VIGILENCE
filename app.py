@@ -23,15 +23,16 @@ from typing import Dict, Any, Optional
 def sanitize_rtsp_url(url: str) -> str:
     if not isinstance(url, str) or not url.startswith("rtsp://"):
         return url
-    last_at = url.rfind("@")
+    url_str = str(url)
+    last_at = url_str.rfind("@")
     if last_at == -1:
-        return url
-    auth_part = url[7:last_at]
+        return url_str
+    auth_part = url_str[7:last_at]
     if ":" in auth_part:
         user, pwd = auth_part.split(":", 1)
         safe_pwd = urllib.parse.quote(pwd)
-        return f"rtsp://{user}:{safe_pwd}{url[last_at:]}"
-    return url
+        return f"rtsp://{user}:{safe_pwd}{url_str[last_at:]}"
+    return url_str
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -89,7 +90,7 @@ def process_camera(camera_id: str):
             time.sleep(0.01)
             continue
         last_frame_id = frame_id
-        frame_count += 1
+        frame_count = int(frame_count) + 1
 
         try:
             h, w = frame.shape[:2]
@@ -131,7 +132,8 @@ def process_camera(camera_id: str):
                             crop = frame[by1:by2, bx1:bx2]
                             if crop.size > 0:
                                 crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                                boxes, _ = recognizer.mtcnn.detect(crop_rgb)
+                                with recognizer.ai_lock:
+                                    boxes, _ = recognizer.mtcnn.detect(crop_rgb)
                                 if isinstance(boxes, np.ndarray) and len(boxes) > 0:
                                     fx1, fy1, fx2, fy2 = boxes[0]
                                     face_bbox = [
@@ -416,7 +418,7 @@ async def clear_history():
         for fname in os.listdir(snaps_dir):
             try:
                 os.remove(os.path.join(snaps_dir, fname))
-                deleted += 1
+                deleted = int(deleted) + 1
             except Exception:
                 pass
 

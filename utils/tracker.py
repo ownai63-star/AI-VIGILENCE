@@ -21,28 +21,38 @@ class ObjectTracker:
         for track in tracks:
             if not track.is_confirmed():
                 continue
+            
+            # If the track wasn't matched to a real YOLO detection THIS frame, drop it instantly
+            # to prevent ghost boxes floating in empty space.
+            if getattr(track, 'time_since_update', 0) > 0:
+                continue
+
             track_id = track.track_id
 
             try:
                 ltrb = list(track.to_ltrb(orig_det=True))
             except TypeError:
                 ltrb = list(track.to_ltrb())
+                
+            ltrb_flt = [float(x) for x in ltrb]
 
             # Snapping to closest actual detection box to prevent drifting
             best_iou = 0
             best_det = ltrb
             
             for d in det_ltrbs:
-                ix1 = max(ltrb[0], d[0])
-                iy1 = max(ltrb[1], d[1])
-                ix2 = min(ltrb[2], d[2])
-                iy2 = min(ltrb[3], d[3])
-                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                union = (ltrb[2]-ltrb[0])*(ltrb[3]-ltrb[1]) + (d[2]-d[0])*(d[3]-d[1]) - inter
-                iou = inter / union if union > 0 else 0
+                df = [float(x) for x in d]
+                ix1 = max(ltrb_flt[0], df[0])
+                iy1 = max(ltrb_flt[1], df[1])
+                ix2 = min(ltrb_flt[2], df[2])
+                iy2 = min(ltrb_flt[3], df[3])
+                inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                union = (ltrb_flt[2]-ltrb_flt[0])*(ltrb_flt[3]-ltrb_flt[1]) + (df[2]-df[0])*(df[3]-df[1]) - inter
+                union_flt = float(union)
+                iou = float(inter) / union_flt if union_flt > 0.0 else 0.0
                 if iou > best_iou:
                     best_iou = iou
-                    best_det = d
+                    best_det = df
                     
             if best_iou > 0.1:
                 ltrb = best_det

@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import torch
 from facenet_pytorch import MTCNN, InceptionResnetV1
+import threading
 
 class FaceRecognizer:
     def __init__(self):
@@ -10,6 +11,7 @@ class FaceRecognizer:
         self.mtcnn = MTCNN(keep_all=True, device=self.device)
         # Resnet for generating embeddings
         self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+        self.ai_lock = threading.Lock()
         
         self.known_face_encodings = []
         self.known_face_names = []
@@ -43,8 +45,9 @@ class FaceRecognizer:
             face_tensor = torch.tensor(np.transpose(face_resized, (2, 0, 1))).float().unsqueeze(0).to(self.device)
             face_tensor = (face_tensor - 127.5) / 128.0
             
-            with torch.no_grad():
-                embedding = self.resnet(face_tensor).cpu().numpy()[0]
+            with self.ai_lock:
+                with torch.no_grad():
+                    embedding = self.resnet(face_tensor).cpu().numpy()[0]
             
             if self.known_face_encodings:
                 distances = np.linalg.norm(self.known_face_encodings - embedding, axis=1)
@@ -61,9 +64,10 @@ class FaceRecognizer:
         Get encoding for registration. Image should be BGR array (from cv2.imread)
         """
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        boxes, _ = self.mtcnn.detect(image_rgb)
+        with self.ai_lock:
+            boxes, _ = self.mtcnn.detect(image_rgb)
         
-        if isinstance(boxes, np.ndarray) and len(boxes) > 0:
+        if boxes is not None and hasattr(boxes, "__len__") and len(list(boxes)) > 0:
             fx1, fy1, fx2, fy2 = [int(b) for b in boxes[0]]
             face_crop = image_rgb[max(0, fy1):max(0, fy2), max(0, fx1):max(0, fx2)]
             if face_crop.size > 0:
@@ -71,7 +75,8 @@ class FaceRecognizer:
                 face_tensor = torch.tensor(np.transpose(face_resized, (2, 0, 1))).float().unsqueeze(0).to(self.device)
                 face_tensor = (face_tensor - 127.5) / 128.0
                 
-                with torch.no_grad():
-                    embedding = self.resnet(face_tensor).cpu().numpy()[0]
+                with self.ai_lock:
+                    with torch.no_grad():
+                        embedding = self.resnet(face_tensor).cpu().numpy()[0]
                 return embedding
         return None
