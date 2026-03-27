@@ -52,7 +52,9 @@ class FaceRecognizer:
             if self.known_face_encodings:
                 distances = np.linalg.norm(self.known_face_encodings - embedding, axis=1)
                 min_idx = np.argmin(distances)
-                if distances[min_idx] < 1.0: # Threshold stringency (0.8 - 1.2 is typical)
+                # Lowered threshold to 1.15 for better side/profile face detection
+                # Original was 1.0, increased to catch more angles
+                if distances[min_idx] < 1.15:
                     name = self.known_face_names[min_idx]
                     confidence = 1 - (distances[min_idx] / 2.0)
                     return name, float(confidence)

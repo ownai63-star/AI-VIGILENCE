@@ -47,7 +47,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
 app.mount("/dataset", StaticFiles(directory="dataset"), name="dataset")
 app.mount("/recordings", StaticFiles(directory="recordings"), name="recordings")
-templates = Jinja2Templates(directory="templates")
+# Configure Jinja2 templates with no cache to avoid errors
+from jinja2 import FileSystemLoader, Environment as JinjaEnvironment
+template_env = JinjaEnvironment(loader=FileSystemLoader("templates"), auto_reload=True)
+templates = Jinja2Templates(env=template_env)
 
 db_manager = DatabaseManager()
 detector = PersonDetector()
@@ -63,6 +66,10 @@ recognizer.load_known_faces(db_manager)
 camera_results: Dict[str, Any] = {}
 results_lock = threading.Lock()  # Single shared lock for camera_results
 
+# Recording state
+camera_writers: Dict[str, Any] = {}
+writer_lock = threading.Lock()
+
 # Active search mission — set by /api/start_search, cleared by /api/stop_search
 # {person_id, name, encoding, found_track_ids: set, running: bool}
 active_search: Dict[str, Any] = {}
@@ -73,112 +80,253 @@ active_search_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def process_camera(camera_id: str):
-    """Background thread per camera: detection + tracking + recording."""
+    """Background thread per camera: detection + tracking + face recognition.
+    
+    Strategy:
+    - Heavy processing (detection, face detection, recognition) runs every N frames
+    - DeepSORT tracker predicts positions between detection frames
+    - Rendering happens every frame at 60 FPS with interpolated positions
+    """
     print(f"[process_camera] Thread started for: {camera_id}")
     tracker: Any = ObjectTracker()
     last_frame_id: int = -1
     frame_count: int = 0
-    track_labels: Dict[Any, tuple] = {}
-    # Cache face bboxes so we don't run MTCNN every single frame
-    face_bbox_cache: Dict[Any, Any] = {}
     
-    processed = []  # Keep track of last known detections for skipped frames
+    # Processing intervals (heavy operations)
+    DETECTION_INTERVAL = 10      # Run YOLO detection every 10 frames
+    FACE_DETECTION_INTERVAL = 20  # Run MTCNN face detection every 20 frames
+    RECOGNITION_INTERVAL = 30     # Run face recognition every 30 frames
+    
+    # Recognition cache: track_id -> (name, confidence, frame_number)
+    RECOGNITION_CACHE_FRAMES = 60  # Cache valid for 60 frames (~1 second at 60 FPS)
+    recognition_cache: Dict[Any, tuple] = {}  # track_id -> (name, conf, frame_num)
+    
+    # Face bbox cache: track_id -> (face_bbox, frame_number)
+    face_bbox_cache: Dict[Any, tuple] = {}
+    FACE_CACHE_FRAMES = 30
+    
+    # Track state for smooth rendering
+    # track_id -> {"bbox": [x1,y1,x2,y2], "velocity": [vx,vy,vx,vy], "last_update": frame_num}
+    track_states: Dict[Any, dict] = {}
+    
+    # Last detection results
+    last_detections = []
+    last_detection_frame = 0
 
     while True:
         frame, frame_id = camera_manager.get_camera_frame_with_id(camera_id)
         if frame is None or frame_id == last_frame_id:
-            time.sleep(0.01)
-            continue
+            continue  # No sleep - keep looping for max FPS
         last_frame_id = frame_id
-        frame_count = int(frame_count) + 1
+        frame_count += 1
 
         try:
             h, w = frame.shape[:2]
+            
+            # Determine which heavy operations to run this frame
+            run_detection = (frame_count % DETECTION_INTERVAL == 1)
+            run_face_detection = (frame_count % FACE_DETECTION_INTERVAL == 1)
+            run_recognition = (frame_count % RECOGNITION_INTERVAL == 1)
 
-            # Run detection + tracking only every 5 frames
-            if frame_count % 5 == 1:
+            if run_detection:
+                # Heavy: YOLO person detection + DeepSORT tracking update
                 detections = detector.detect(frame)
                 tracks = tracker.update(detections, frame)
-
-            # Prune stale labels and face cache
-                active_ids = {t["id"] for t in tracks}
-                track_labels   = {k: v for k, v in track_labels.items()   if k in active_ids}
-                face_bbox_cache = {k: v for k, v in face_bbox_cache.items() if k in active_ids}
-
-                new_processed = []
-                run_face = (frame_count % 10 == 1)  # refresh face bbox every 10 frames (6 times a sec)
-
+                last_detections = tracks
+                last_detection_frame = frame_count
+                
+                # Update track states with new detections
+                current_ids = set()
                 for t in tracks:
-                    # Clamp body bbox strictly to frame
-                    bx1 = max(0, int(t["bbox"][0]))
-                    by1 = max(0, int(t["bbox"][1]))
-                    bx2 = min(w - 1, int(t["bbox"][2]))
-                    by2 = min(h - 1, int(t["bbox"][3]))
-
-                    # Skip degenerate or full-frame boxes
-                    box_w = bx2 - bx1
-                    box_h = by2 - by1
-                    if box_w < 20 or box_h < 20:
-                        continue
-                    if box_w > w * 0.95 or box_h > h * 0.95:
-                        continue
-
-                    bbox = [bx1, by1, bx2, by2]
-
-                    # Run MTCNN face detection periodically
-                    if run_face:
-                        face_bbox = None
-                        try:
-                            crop = frame[by1:by2, bx1:bx2]
-                            if crop.size > 0:
-                                crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                                with recognizer.ai_lock:
-                                    boxes, _ = recognizer.mtcnn.detect(crop_rgb)
-                                if isinstance(boxes, np.ndarray) and len(boxes) > 0:
-                                    fx1, fy1, fx2, fy2 = boxes[0]
-                                    face_bbox = [
-                                        max(0,     bx1 + int(fx1)),
-                                        max(0,     by1 + int(fy1)),
-                                        min(w - 1, bx1 + int(fx2)),
-                                        min(h - 1, by1 + int(fy2))
-                                    ]
-                                    # Sanity: face must be smaller than body box
-                                    fw = face_bbox[2] - face_bbox[0]
-                                    fh = face_bbox[3] - face_bbox[1]
-                                    if fw < 10 or fh < 10 or fw > box_w or fh > box_h:
-                                        face_bbox = None
-                        except Exception:
-                            face_bbox = None
-                        face_bbox_cache[t["id"]] = face_bbox
+                    track_id = t["id"]
+                    current_ids.add(track_id)
+                    new_bbox = t["bbox"]
+                    
+                    if track_id in track_states:
+                        old_bbox = track_states[track_id]["bbox"]
+                        # Calculate velocity for prediction
+                        velocity = [
+                            new_bbox[0] - old_bbox[0],
+                            new_bbox[1] - old_bbox[1],
+                            new_bbox[2] - old_bbox[2],
+                            new_bbox[3] - old_bbox[3]
+                        ]
+                        track_states[track_id] = {
+                            "bbox": new_bbox,
+                            "velocity": velocity,
+                            "last_update": frame_count,
+                            "active": True
+                        }
                     else:
-                        face_bbox = face_bbox_cache.get(t["id"])
+                        track_states[track_id] = {
+                            "bbox": new_bbox,
+                            "velocity": [0, 0, 0, 0],
+                            "last_update": frame_count,
+                            "active": True
+                        }
+                
+                # Mark tracks not detected as inactive
+                for tid in track_states:
+                    if tid not in current_ids:
+                        track_states[tid]["active"] = False
+                
+                # Remove very stale tracks (not updated for 90 frames)
+                stale_ids = [tid for tid, state in track_states.items() 
+                            if not state["active"] and (frame_count - state["last_update"]) > 90]
+                for tid in stale_ids:
+                    del track_states[tid]
+                    recognition_cache.pop(tid, None)
+                    face_bbox_cache.pop(tid, None)
+            
+            # Predict positions for all tracks using velocity (Kalman filter-like)
+            frames_since_detection = frame_count - last_detection_frame
+            if frames_since_detection > 0:
+                for tid, state in track_states.items():
+                    if state["active"]:
+                        # Predict new position based on velocity
+                        v = state["velocity"]
+                        old_bbox = state["bbox"]
+                        # Apply velocity with damping to reduce drift
+                        damping = 0.95 ** frames_since_detection
+                        predicted_bbox = [
+                            old_bbox[0] + v[0] * damping,
+                            old_bbox[1] + v[1] * damping,
+                            old_bbox[2] + v[2] * damping,
+                            old_bbox[3] + v[3] * damping
+                        ]
+                        state["predicted_bbox"] = predicted_bbox
+                    else:
+                        state["predicted_bbox"] = state["bbox"]
+            else:
+                for state in track_states.values():
+                    state["predicted_bbox"] = state["bbox"]
 
-                    name, conf = track_labels.get(t["id"], ("Unknown", 0.0))
-                    new_processed.append({
-                        "id": t["id"],
-                        "bbox": bbox,
-                        "face_bbox": face_bbox,
-                        "name": name,
-                        "confidence": conf
-                    })
+            # Face detection on active tracks (periodic)
+            if run_face_detection:
+                for tid, state in list(track_states.items()):
+                    if not state["active"]:
+                        continue
+                    
+                    bbox = state["predicted_bbox"]
+                    bx1, by1, bx2, by2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                    bx1, by1 = max(0, bx1), max(0, by1)
+                    bx2, by2 = min(w, bx2), min(h, by2)
+                    
+                    if bx2 - bx1 < 30 or by2 - by1 < 30:
+                        continue
+                    
+                    try:
+                        crop = frame[by1:by2, bx1:bx2]
+                        if crop.size > 0:
+                            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                            with recognizer.ai_lock:
+                                boxes, probs = recognizer.mtcnn.detect(crop_rgb)
+                            
+                            if isinstance(boxes, np.ndarray) and len(boxes) > 0:
+                                best_idx = int(np.argmax(probs)) if probs is not None else 0
+                                fx1, fy1, fx2, fy2 = boxes[best_idx]
+                                face_bbox = [
+                                    max(0, bx1 + int(fx1)),
+                                    max(0, by1 + int(fy1)),
+                                    min(w, bx1 + int(fx2)),
+                                    min(h, by1 + int(fy2))
+                                ]
+                                fw, fh = face_bbox[2] - face_bbox[0], face_bbox[3] - face_bbox[1]
+                                if fw >= 20 and fh >= 20:
+                                    face_bbox_cache[tid] = (face_bbox, frame_count)
+                    except Exception:
+                        pass
+            
+            # Prune old face cache
+            for tid in list(face_bbox_cache.keys()):
+                _, cache_frame = face_bbox_cache[tid]
+                if (frame_count - cache_frame) > FACE_CACHE_FRAMES:
+                    del face_bbox_cache[tid]
 
-            processed = new_processed
+            # Face recognition (periodic)
+            if run_recognition:
+                for tid, state in track_states.items():
+                    if not state["active"]:
+                        continue
+                    
+                    # Check if we have a recent face detection
+                    if tid in face_bbox_cache:
+                        face_bbox, face_frame = face_bbox_cache[tid]
+                        
+                        # Check recognition cache
+                        cached = recognition_cache.get(tid)
+                        if cached:
+                            cached_name, cached_conf, cached_frame = cached
+                            cache_age = frame_count - cached_frame
+                            
+                            if cache_age < RECOGNITION_CACHE_FRAMES:
+                                # Still valid, skip re-recognition
+                                continue
+                        
+                        # Run recognition
+                        try:
+                            name, conf = recognizer.recognize(frame, face_bbox)
+                            if name != "Unknown" and conf > 0.35:
+                                recognition_cache[tid] = (name, conf, frame_count)
+                                print(f"[Camera:{camera_id}] Recognized: {name} (conf: {conf:.2f})")
+                            elif tid in recognition_cache:
+                                # Recognition failed, keep cache for now
+                                pass
+                        except Exception:
+                            pass
 
+            # Build render data from track states
+            processed = []
+            for tid, state in track_states.items():
+                bbox = state["predicted_bbox"]
+                bx1 = max(0, int(bbox[0]))
+                by1 = max(0, int(bbox[1]))
+                bx2 = min(w - 1, int(bbox[2]))
+                by2 = min(h - 1, int(bbox[3]))
+                
+                box_w = bx2 - bx1
+                box_h = by2 - by1
+                if box_w < 20 or box_h < 20:
+                    continue
+                if box_w > w * 0.95 or box_h > h * 0.95:
+                    continue
+
+                # Get recognition result
+                name, conf = "Unknown", 0.0
+                if tid in recognition_cache:
+                    cached_name, cached_conf, cached_frame = recognition_cache[tid]
+                    if (frame_count - cached_frame) < RECOGNITION_CACHE_FRAMES:
+                        name, conf = cached_name, cached_conf
+
+                # Get face bbox
+                face_bbox = None
+                if tid in face_bbox_cache:
+                    face_bbox, _ = face_bbox_cache[tid]
+
+                processed.append({
+                    "id": tid,
+                    "bbox": [bx1, by1, bx2, by2],
+                    "face_bbox": face_bbox,
+                    "name": name,
+                    "confidence": conf
+                })
+
+            # Active search check
             with active_search_lock:
                 search = dict(active_search)
 
-            if search.get("running") and run_face:
+            if search.get("running") and run_recognition:
                 for t in processed:
                     track_key = (camera_id, t["id"])
                     if track_key not in search.get("found_track_ids", set()):
-                        if t.get("face_bbox") is not None:
+                        if t.get("face_bbox") is not None and t["name"] == "Unknown":
                             threading.Thread(
                                 target=recognition_worker,
-                                args=(frame.copy(), t["face_bbox"], t["id"], camera_id, track_labels),
+                                args=(frame.copy(), t["face_bbox"], t["id"], camera_id, recognition_cache),
                                 daemon=True
                             ).start()
 
-            # Overlay rendering MUST happen for every frame to provide perfectly synced stream
+            # Render at 60 FPS - every frame gets overlay
             record_frame = frame.copy()
             for t in processed:
                 bx1, by1, bx2, by2 = t["bbox"]
@@ -187,31 +335,42 @@ def process_camera(camera_id: str):
                 conf = float(t["confidence"])
                 tid = str(t["id"])
 
-                body_color = (0, 255, 0) if name != "Unknown" else (0, 165, 255)
-                label = f"{name} ({conf:.2f})" if name != "Unknown" else f"Person {tid}"
-                cv2.rectangle(record_frame, (bx1, by1), (bx2, by2), body_color, 2)
-                cv2.putText(record_frame, label, (bx1, max(by1 - 10, 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, body_color, 2)
+                if name != "Unknown":
+                    body_color = (0, 255, 0)  # Green
+                    label = f"{name} ({conf:.2f})"
+                else:
+                    body_color = (0, 165, 255)  # Orange
+                    label = f"Person {tid}"
+                
+                # Thicker lines for better visibility
+                cv2.rectangle(record_frame, (bx1, by1), (bx2, by2), body_color, 3)
+                cv2.putText(record_frame, label, (bx1, max(by1 - 10, 25)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, body_color, 2)
 
                 if face_bbox:
-                    cv2.rectangle(record_frame, (face_bbox[0], face_bbox[1]), (face_bbox[2], face_bbox[3]), (255, 255, 0), 2)
-                    cv2.putText(record_frame, "face", (face_bbox[0], max(face_bbox[1] - 6, 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+                    face_color = (0, 255, 255) if name != "Unknown" else (255, 255, 0)
+                    cv2.rectangle(record_frame, (face_bbox[0], face_bbox[1]), 
+                                  (face_bbox[2], face_bbox[3]), face_color, 2)
 
-            # Output perfectly synchronized frame to the live feed
+            # Output at full frame rate
             with results_lock:
                 camera_results[camera_id] = {"rendered_frame": record_frame, "frame_id": frame_id, "tracks": processed}
+
+            # Write to recording
+            with writer_lock:
+                writer_data = camera_writers.get(camera_id)
+                if writer_data and writer_data.get("writer"):
+                    writer_data["writer"].write(record_frame)
 
         except Exception as e:
             print(f"[process_camera:{camera_id}] {e}")
             import traceback; traceback.print_exc()
 
-        # Removed forced 0.01s sleep to allow maximum unrestricted 60FPS loop speed
 
-
-def recognition_worker(frame, face_bbox, track_id, camera_id, track_labels):
+def recognition_worker(frame, face_bbox, track_id, camera_id, recognition_cache):
     """
     Background recognition for active search using exact face bbox.
+    Updates the recognition cache when a match is found.
     """
     with active_search_lock:
         if not active_search.get("running"):
@@ -224,10 +383,10 @@ def recognition_worker(frame, face_bbox, track_id, camera_id, track_labels):
         if track_key in found_ids:
             return
 
-    # Run face recognition on the perfectly snapped face box
+    # Run face recognition on the face box
     name, confidence = recognizer.recognize(frame, face_bbox)
 
-    if name == target_name and confidence > 0.4:
+    if name == target_name and confidence > 0.35:  # Lower threshold for better detection
         with active_search_lock:
             if not active_search.get("running"):
                 return
@@ -235,8 +394,9 @@ def recognition_worker(frame, face_bbox, track_id, camera_id, track_labels):
                 return
             active_search["found_track_ids"].add(track_key)
 
-        # Persist the label so it survives frame resets
-        track_labels[track_id] = (target_name, confidence)
+        # Update recognition cache so it appears on live feed immediately
+        # Format: (name, confidence, frame_number, miss_count)
+        recognition_cache[track_id] = (target_name, confidence, 0, 0)
 
         # Take ONE snapshot
         timestamp = int(time.time())
@@ -260,6 +420,10 @@ async def index(request: Request):
 @app.get("/search", response_class=HTMLResponse)
 async def search_page(request: Request):
     return templates.TemplateResponse("search.html", {"request": request})
+
+@app.get("/recordings_page", response_class=HTMLResponse)
+async def recordings_page(request: Request):
+    return templates.TemplateResponse("recordings.html", {"request": request})
 
 @app.post("/register")
 async def register_person(name: str = Form(...), file: UploadFile = File(...)):
@@ -312,6 +476,42 @@ async def delete_camera(camera_id: str = Form(...)):
 @app.get("/api/cameras")
 async def api_cameras():
     return camera_manager.get_active_cameras()
+
+# ---------------------------------------------------------------------------
+# Recording API
+# ---------------------------------------------------------------------------
+@app.post("/api/toggle_recording")
+async def toggle_recording(camera_id: str = Form(...)):
+    with writer_lock:
+        if camera_id in camera_writers:
+            # Stop recording
+            writer_data = camera_writers.pop(camera_id)
+            writer_data["writer"].release()
+            db_manager.end_recording(writer_data["db_id"])
+            return {"status": "success", "recording": False}
+        else:
+            # Start recording
+            with results_lock:
+                data = camera_results.get(camera_id, {})
+                frame = data.get("rendered_frame")
+            if frame is None:
+                return {"status": "error", "message": "Camera offline or warming up"}
+                
+            h, w = frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'VP80')
+            timestamp = int(time.time())
+            filename = f"rec_{camera_id}_{timestamp}.webm"
+            file_path = f"recordings/{filename}"
+            writer = cv2.VideoWriter(file_path, fourcc, 20.0, (w, h))
+            
+            db_id = db_manager.start_recording(camera_id, file_path)
+            camera_writers[camera_id] = {"writer": writer, "db_id": db_id}
+            return {"status": "success", "recording": True}
+
+@app.get("/api/recording_status")
+async def get_recording_status():
+    with writer_lock:
+        return {"active_recordings": list(camera_writers.keys())}
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +624,266 @@ async def clear_history():
 
     print(f"Cleared {deleted} snapshots.")
     return {"status": "success", "message": f"Cleared {deleted} records"}
+
+@app.get("/api/recordings")
+async def api_recordings(camera_id: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None):
+    results = db_manager.search_recordings(camera_id, start_time, end_time)
+    return [{"id": r[0], "camera_id": r[1], "start_time": r[2], "end_time": r[3], "file_path": r[4]} for r in results]
+
+@app.delete("/api/recordings/{record_id}")
+async def delete_recording(record_id: int):
+    rec = db_manager.get_recording(record_id)
+    if rec:
+        try:
+            os.remove(rec[4])
+        except Exception:
+            pass
+        db_manager.delete_recording(record_id)
+    return {"status": "success"}
+
+
+# ---------------------------------------------------------------------------
+# Video Person Search API
+# ---------------------------------------------------------------------------
+
+import json
+from fastapi import BackgroundTasks
+
+# Store video search progress
+video_search_progress: Dict[str, Any] = {}
+video_search_lock = threading.Lock()
+
+@app.get("/api/persons")
+async def api_persons():
+    """Get all registered persons for dropdown selection."""
+    persons = db_manager.get_registered_persons()
+    return [{"id": p[0], "name": p[1], "image_path": p[2]} for p in persons]
+
+
+def scan_video_for_person(video_path: str, target_encoding: np.ndarray, sample_interval: int = 10) -> list:
+    """
+    Scan a video file for ALL occurrences of a person with the target face encoding.
+    Detects every face in each frame and matches against the target person.
+    Groups continuous appearances into flagged segments with start/end timestamps.
+    Returns list of detection segments where the person appears.
+    """
+    results = []
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"[VideoScan] ERROR: Could not open video {video_path}")
+        return results
+    
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    frame_count = 0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Track continuous appearances
+    current_segment = None
+    last_match_frame = -1
+    min_segment_gap = int(fps * 2)  # 2 seconds gap to create new segment
+    
+    # Lower threshold for better detection (same as live recognition)
+    DISTANCE_THRESHOLD = 1.15
+    
+    print(f"[VideoScan] Starting scan of {video_path}")
+    print(f"[VideoScan] Total frames: {total_frames}, FPS: {fps}, Sample interval: {sample_interval}")
+    
+    matches_found = 0
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Process every Nth frame for efficiency
+        if frame_count % sample_interval == 0:
+            try:
+                # Detect ALL faces in frame using full frame (not just body crop)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                with recognizer.ai_lock:
+                    boxes, probs = recognizer.mtcnn.detect(frame_rgb)
+                
+                match_found = False
+                best_confidence = 0.0
+                best_distance = 999.0
+                
+                if boxes is not None and len(boxes) > 0:
+                    # Check EACH face in the frame against target
+                    for i, box in enumerate(boxes):
+                        fx1, fy1, fx2, fy2 = [int(b) for b in box]
+                        
+                        # Ensure valid box
+                        fx1, fy1 = max(0, fx1), max(0, fy1)
+                        fx2, fy2 = min(frame.shape[1], fx2), min(frame.shape[0], fy2)
+                        
+                        fw, fh = fx2 - fx1, fy2 - fy1
+                        if fw < 30 or fh < 30:  # Skip very small faces
+                            continue
+                        
+                        face_crop = frame_rgb[fy1:fy2, fx1:fx2]
+                        
+                        if face_crop.size > 0:
+                            face_resized = cv2.resize(face_crop, (160, 160))
+                            face_tensor = torch.tensor(np.transpose(face_resized, (2, 0, 1))).float().unsqueeze(0).to(recognizer.device)
+                            face_tensor = (face_tensor - 127.5) / 128.0
+                            
+                            with recognizer.ai_lock:
+                                with torch.no_grad():
+                                    embedding = recognizer.resnet(face_tensor).cpu().numpy()[0]
+                            
+                            # Compare with target
+                            distance = float(np.linalg.norm(target_encoding - embedding))
+                            confidence = 1 - (distance / 2.0)
+                            
+                            if distance < DISTANCE_THRESHOLD:  # Match found
+                                match_found = True
+                                matches_found += 1
+                                if confidence > best_confidence:
+                                    best_confidence = confidence
+                                    best_distance = distance
+                                if frame_count % 100 == 0:  # Log every 100th match frame
+                                    print(f"[VideoScan] Match at frame {frame_count}, dist: {distance:.3f}, conf: {confidence:.2f}")
+                
+                # Handle segment tracking
+                if match_found:
+                    timestamp_sec = frame_count / fps
+                    
+                    if current_segment is None or (frame_count - last_match_frame) > min_segment_gap:
+                        # Start new segment
+                        if current_segment is not None:
+                            results.append(current_segment)
+                        current_segment = {
+                            "start_seconds": timestamp_sec,
+                            "start_timestamp": f"{int(timestamp_sec // 60)}:{int(timestamp_sec % 60):02d}",
+                            "end_seconds": timestamp_sec,
+                            "end_timestamp": f"{int(timestamp_sec // 60)}:{int(timestamp_sec % 60):02d}",
+                            "confidence": best_confidence,
+                            "start_frame": frame_count,
+                            "end_frame": frame_count
+                        }
+                        print(f"[VideoScan] New segment started at {current_segment['start_timestamp']}")
+                    else:
+                        # Extend current segment
+                        current_segment["end_seconds"] = timestamp_sec
+                        current_segment["end_timestamp"] = f"{int(timestamp_sec // 60)}:{int(timestamp_sec % 60):02d}"
+                        current_segment["end_frame"] = frame_count
+                        if best_confidence > current_segment["confidence"]:
+                            current_segment["confidence"] = best_confidence
+                    
+                    last_match_frame = frame_count
+                    
+            except Exception as e:
+                print(f"[VideoScan] Error processing frame {frame_count}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        frame_count += 1
+        
+        # Progress update every 500 frames
+        if frame_count % 500 == 0 and total_frames > 0:
+            progress = (frame_count / total_frames) * 100
+            print(f"[VideoScan] Progress: {progress:.1f}% ({frame_count}/{total_frames})")
+    
+    # Don't forget the last segment
+    if current_segment is not None:
+        results.append(current_segment)
+    
+    cap.release()
+    print(f"[VideoScan] Scan complete. Found {len(results)} segments, {matches_found} total matches")
+    return results
+
+
+@app.post("/api/search_video_by_name")
+async def search_video_by_name(request: Request):
+    """Search for a person by name across selected videos."""
+    data = await request.json()
+    name = data.get("name")
+    video_ids = data.get("video_ids", [])
+    
+    if not name or not video_ids:
+        return {"status": "error", "message": "Name and video IDs required"}
+    
+    # Get person's encoding
+    persons = db_manager.get_registered_persons()
+    target = next((p for p in persons if p[1].lower() == name.lower()), None)
+    if target is None:
+        return {"status": "error", "message": f"Person '{name}' not found"}
+    
+    target_encoding = np.frombuffer(target[3], dtype=np.float32)
+    
+    # Search each video
+    all_results = []
+    total_segments = 0
+    for vid_id in video_ids:
+        rec = db_manager.get_recording(vid_id)
+        if rec and os.path.exists(rec[4]):
+            segments = scan_video_for_person(rec[4], target_encoding)
+            total_segments += len(segments)
+            for segment in segments:
+                all_results.append({
+                    **segment,
+                    "video_id": vid_id,
+                    "video_name": os.path.basename(rec[4]),
+                    "video_path": rec[4],
+                    "camera_id": rec[1],
+                    "person_name": name
+                })
+    
+    # Sort by start time
+    all_results.sort(key=lambda x: x["start_seconds"])
+    
+    return {
+        "status": "success", 
+        "results": all_results,
+        "total_segments": total_segments,
+        "videos_searched": len(video_ids)
+    }
+
+
+@app.post("/api/search_video_by_image")
+async def search_video_by_image(file: UploadFile = File(...), video_ids: str = Form(...)):
+    """Search for a person using an uploaded image across selected videos."""
+    video_ids_list = json.loads(video_ids)
+    
+    if not video_ids_list:
+        return {"status": "error", "message": "Video IDs required"}
+    
+    # Get encoding from uploaded image
+    img_bytes = await file.read()
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    target_encoding = recognizer.get_encoding(image)
+    if target_encoding is None:
+        return {"status": "error", "message": "No face detected in uploaded image"}
+    
+    # Search each video
+    all_results = []
+    total_segments = 0
+    for vid_id in video_ids_list:
+        rec = db_manager.get_recording(vid_id)
+        if rec and os.path.exists(rec[4]):
+            segments = scan_video_for_person(rec[4], target_encoding)
+            total_segments += len(segments)
+            for segment in segments:
+                all_results.append({
+                    **segment,
+                    "video_id": vid_id,
+                    "video_name": os.path.basename(rec[4]),
+                    "video_path": rec[4],
+                    "camera_id": rec[1],
+                    "person_name": "Unknown (from image)"
+                })
+    
+    # Sort by start time
+    all_results.sort(key=lambda x: x["start_seconds"])
+    
+    return {
+        "status": "success", 
+        "results": all_results,
+        "total_segments": total_segments,
+        "videos_searched": len(video_ids_list)
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@
         <nav>
             <a href="/" class="active">Dashboard</a>
             <a href="/search">Search History</a>
-
+            <a href="/recordings_page">Recordings</a>
         </nav>
     </header>
 
@@ -64,7 +64,13 @@
                 <div class="feed-container" id="feed-{{ cam }}">
                     <div class="feed-header">
                         <h3>{{ cam }}</h3>
-                        <span class="live-indicator">LIVE</span>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <span class="live-indicator">LIVE</span>
+                            <button data-rec-cam="{{ cam }}" onclick="toggleRecording('{{ cam }}', this)" 
+                                    style="background: #ff3333; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-weight: bold;">
+                                ⏺ Record
+                            </button>
+                        </div>
                     </div>
                     <img src="/video_feed/{{ cam }}" alt="Live Feed">
                 </div>
@@ -78,6 +84,6 @@
         </div>
     </main>
 
-    <script src="/static/script.js"></script>
+    <script type="module" src="/static/script.js"></script>
 </body>
 </html>
