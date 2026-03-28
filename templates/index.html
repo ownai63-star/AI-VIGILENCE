@@ -18,47 +18,26 @@
     <header>
         <div class="logo">AI VIGILANCE</div>
         <nav>
-            <a href="/" class="active">Dashboard</a>
-            <a href="/search">Search History</a>
+            <a href="/" class="active">Feeds</a>
+            <a href="/people">People</a>
+            <a href="/cameras">Cameras</a>
+            <a href="/search">Search</a>
             <a href="/recordings_page">Recordings</a>
         </nav>
     </header>
 
     <main>
-        <div class="sidebar">
-            <section class="registration">
-                <h2>Register Person</h2>
-                <form id="register-form">
-                    <input type="text" name="name" placeholder="Full Name" required>
-                    <input type="file" name="file" accept="image/*" required>
-                    <button type="submit">Register</button>
-                </form>
-                <div id="reg-status"></div>
-            </section>
-
-            <section class="add-camera">
-                <h2>Add Camera</h2>
-                <form id="camera-form">
-                    <input type="text" name="camera_id" placeholder="Camera Name (e.g. Cam1)" required>
-                    <select name="camera_type" id="camera-type" style="width: 100%; margin-bottom: 1rem; padding: 10px; border-radius: 5px; border: none; background: #222; color: #fff;">
-                        <option value="webcam">Local Webcam</option>
-                        <option value="rtsp">RTSP Stream</option>
-                        <option value="ipwebcam">IP Webcam App (Android)</option>
-                        <option value="droidcam">DroidCam</option>
-                    </select>
-                    <input type="text" name="source" id="camera-source" placeholder="Camera Index (e.g. 0)" required>
-                    <button type="submit">Connect</button>
-                </form>
-            </section>
-            
-            <section class="manage-cameras" style="margin-top: 2rem;">
-                <h2>Manage Cameras</h2>
-                <ul id="active-cameras-list" style="list-style: none; padding: 0;">
-                </ul>
-            </section>
-        </div>
-
-        <div class="dashboard">
+        <div class="dashboard" style="width:100%;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+                <h2 style="margin:0;">Live Feeds</h2>
+                <div>
+                    {% if total_pages > 1 %}
+                        <a href="/?page={{ page - 1 }}&per_page={{ per_page }}" style="margin-right:10px; {{ 'pointer-events:none;opacity:0.5;' if page <= 1 else '' }}">◀ Prev</a>
+                        <span style="color:#aaa;">Page {{ page }} of {{ total_pages }}</span>
+                        <a href="/?page={{ page + 1 }}&per_page={{ per_page }}" style="margin-left:10px; {{ 'pointer-events:none;opacity:0.5;' if page >= total_pages else '' }}">Next ▶</a>
+                    {% endif %}
+                </div>
+            </div>
             <div class="feed-grid" id="feed-grid">
                 {% for cam in cameras %}
                 <div class="feed-container" id="feed-{{ cam }}">
@@ -78,7 +57,7 @@
             </div>
             {% if not cameras %}
             <div class="no-cameras">
-                <p>No active cameras. Connect a camera to start monitoring.</p>
+                <p>No active cameras on this page. Connect cameras or change page.</p>
             </div>
             {% endif %}
         </div>

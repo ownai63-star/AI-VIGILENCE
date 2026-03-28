@@ -42,6 +42,14 @@ class DatabaseManager:
                     file_path TEXT
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS occupancy_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    camera_id TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    count INTEGER
+                )
+            ''')
             conn.commit()
 
     def register_person(self, name, image_path, encoding):
@@ -150,5 +158,32 @@ class DatabaseManager:
                 params.append(end_time)
             
             query += " ORDER BY d.timestamp DESC"
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+    def log_occupancy(self, camera_id, count):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO occupancy_log (camera_id, count) VALUES (?, ?)',
+                (camera_id, int(count))
+            )
+            conn.commit()
+
+    def search_occupancy(self, camera_id=None, start_time=None, end_time=None):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = 'SELECT id, camera_id, timestamp, count FROM occupancy_log WHERE 1=1'
+            params = []
+            if camera_id:
+                query += " AND camera_id = ?"
+                params.append(camera_id)
+            if start_time:
+                query += " AND timestamp >= ?"
+                params.append(start_time)
+            if end_time:
+                query += " AND timestamp <= ?"
+                params.append(end_time)
+            query += " ORDER BY timestamp DESC"
             cursor.execute(query, params)
             return cursor.fetchall()

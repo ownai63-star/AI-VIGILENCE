@@ -35,6 +35,35 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // -------------------------------------------------------------------------
+    // 1.a People page — list all registered persons
+    // -------------------------------------------------------------------------
+    const personsList = document.getElementById('persons-list');
+    if (personsList) {
+        const loadPersons = async () => {
+            try {
+                const res = await fetch('/api/persons');
+                const persons = await res.json();
+                if (!persons || persons.length === 0) {
+                    personsList.innerHTML = '<p style="color:#666;">No registered persons yet.</p>';
+                } else {
+                    personsList.innerHTML = persons.map(p => `
+                        <div class="detection-card" style="text-align:center;">
+                            <img class="detection-image" src="/${p.image_path}" alt="${p.name}" 
+                                 onerror="this.src='/static/default-avatar.png'">
+                            <div class="detection-info">
+                                <h4>${p.name}</h4>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            } catch {
+                personsList.innerHTML = '<p style="color:#ff3333;">Failed to load persons.</p>';
+            }
+        };
+        loadPersons();
+    }
+
+    // -------------------------------------------------------------------------
     // 2. Camera type dropdown placeholder
     // -------------------------------------------------------------------------
     const camTypeDropdown = document.getElementById('camera-type');
@@ -81,11 +110,45 @@ document.addEventListener('DOMContentLoaded', () => {
                         style="background:#ff3333;color:white;border:none;padding:5px 10px;
                                cursor:pointer;border-radius:3px;width:auto;margin:0;">Remove</button>
                 </li>`).join('');
+            const occSelect = document.getElementById('occ-camera-select');
+            if (occSelect) {
+                const current = occSelect.value;
+                occSelect.innerHTML = '<option value=\"\">All Cameras</option>' + cams.map(c => `<option value="${c}">${c}</option>`).join('');
+                if (current) occSelect.value = current;
+            }
         };
         fetchCameras();
         setInterval(fetchCameras, 5000);
     }
 
+    const occBtn = document.getElementById('occ-load-btn');
+    const occTbody = document.getElementById('occ-tbody');
+    if (occBtn && occTbody) {
+        const loadOcc = async () => {
+            const cam = document.getElementById('occ-camera-select')?.value || '';
+            const start = document.getElementById('occ-start')?.value || '';
+            const end = document.getElementById('occ-end')?.value || '';
+            const params = new URLSearchParams();
+            if (cam) params.append('camera_id', cam);
+            if (start) params.append('start_time', start);
+            if (end) params.append('end_time', end);
+            const res = await fetch(`/api/occupancy?${params.toString()}`);
+            const rows = await res.json();
+            if (!rows || rows.length === 0) {
+                occTbody.innerHTML = '<tr><td style="padding:8px;color:#666;" colspan="3">No data</td></tr>';
+                return;
+            }
+            occTbody.innerHTML = rows.map(r => `
+                <tr style="border-bottom:1px solid #222;">
+                    <td style="padding:8px;">${new Date(r.timestamp).toLocaleString()}</td>
+                    <td style="padding:8px;">${r.camera_id}</td>
+                    <td style="padding:8px;">${r.count}</td>
+                </tr>
+            `).join('');
+        };
+        occBtn.addEventListener('click', loadOcc);
+        loadOcc();
+    }
     // -------------------------------------------------------------------------
     // 5. Search Page — Active search mission + history grid
     // -------------------------------------------------------------------------

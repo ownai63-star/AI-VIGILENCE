@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vigilance - Cameras</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="logo">AI VIGILANCE</div>
+        <nav>
+            <a href="/">Feeds</a>
+            <a href="/people">People</a>
+            <a href="/cameras" class="active">Cameras</a>
+            <a href="/search">Search</a>
+            <a href="/recordings_page">Recordings</a>
+        </nav>
+    </header>
+    <main>
+        <div class="sidebar" style="width:100%; max-width:600px;">
+            <section class="add-camera">
+                <h2>Add Camera</h2>
+                <form id="camera-form">
+                    <input type="text" name="camera_id" placeholder="Camera Name (e.g. Cam1)" required>
+                    <select name="camera_type" id="camera-type" style="width: 100%; margin-bottom: 1rem; padding: 10px; border-radius: 5px; border: none; background: #222; color: #fff;">
+                        <option value="webcam">Local Webcam</option>
+                        <option value="rtsp">RTSP Stream</option>
+                        <option value="ipwebcam">IP Webcam App (Android)</option>
+                        <option value="droidcam">DroidCam</option>
+                    </select>
+                    <input type="text" name="source" id="camera-source" placeholder="Camera Index (e.g. 0)" required>
+                    <button type="submit">Connect</button>
+                </form>
+            </section>
+        </div>
+        <div class="dashboard">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+                <h2 style="margin:0;">Active Cameras</h2>
+            </div>
+            <ul id="active-cameras-list" style="list-style: none; padding: 0;">
+                <li style="color:#666;">Loading cameras...</li>
+            </ul>
+            <div style="margin-top:2rem;">
+                <h2 style="margin:0 0 10px 0;">Occupancy Log</h2>
+                <div class="filter-controls">
+                    <select id="occ-camera-select" style="padding:10px; background:#222; color:#fff; border:1px solid #333; border-radius:5px;">
+                        <option value="">All Cameras</option>
+                    </select>
+                    <label style="color:#aaa; font-size:0.85rem;">From</label>
+                    <input type="datetime-local" id="occ-start">
+                    <label style="color:#aaa; font-size:0.85rem;">To</label>
+                    <input type="datetime-local" id="occ-end">
+                    <button id="occ-load-btn" class="btn-secondary">Load</button>
+                </div>
+                <div id="occ-results" style="overflow:auto;">
+                    <table style="width:100%; border-collapse:collapse;">
+                        <thead>
+                            <tr style="text-align:left; border-bottom:1px solid #333;">
+                                <th style="padding:8px;">Time</th>
+                                <th style="padding:8px;">Camera</th>
+                                <th style="padding:8px;">Count</th>
+                            </tr>
+                        </thead>
+                        <tbody id="occ-tbody">
+                            <tr><td style="padding:8px;color:#666;" colspan="3">No data</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+    <script type="module" src="/static/script.js"></script>
+</body>
+</html>

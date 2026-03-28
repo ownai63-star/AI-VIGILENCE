@@ -69,6 +69,7 @@ results_lock = threading.Lock()  # Single shared lock for camera_results
 # Recording state
 camera_writers: Dict[str, Any] = {}
 writer_lock = threading.Lock()
+occupancy_last_count: Dict[str, int] = {}
 
 # Active search mission — set by /api/start_search, cleared by /api/stop_search
 # {person_id, name, encoding, found_track_ids: set, running: bool}
@@ -92,18 +93,16 @@ def process_camera(camera_id: str):
     last_frame_id: int = -1
     frame_count: int = 0
     
-    # Processing intervals (heavy operations)
-    DETECTION_INTERVAL = 10      # Run YOLO detection every 10 frames
-    FACE_DETECTION_INTERVAL = 20  # Run MTCNN face detection every 20 frames
-    RECOGNITION_INTERVAL = 30     # Run face recognition every 30 frames
+    # Processing intervals (heavier CPU utilization per request)
+    DETECTION_INTERVAL = 1       # Run YOLO detection every frame
+    RECOGNITION_INTERVAL = 30     # Run face recognition periodically
     
     # Recognition cache: track_id -> (name, confidence, frame_number)
     RECOGNITION_CACHE_FRAMES = 60  # Cache valid for 60 frames (~1 second at 60 FPS)
     recognition_cache: Dict[Any, tuple] = {}  # track_id -> (name, conf, frame_num)
     
-    # Face bbox cache: track_id -> (face_bbox, frame_number)
-    face_bbox_cache: Dict[Any, tuple] = {}
-    FACE_CACHE_FRAMES = 30
+    # Unique people seen on this camera (cumulative unique track IDs)
+    seen_track_ids = set()
     
     # Track state for smooth rendering
     # track_id -> {"bbox": [x1,y1,x2,y2], "velocity": [vx,vy,vx,vy], "last_update": frame_num}
@@ -124,9 +123,8 @@ def process_camera(camera_id: str):
             h, w = frame.shape[:2]
             
             # Determine which heavy operations to run this frame
-            run_detection = (frame_count % DETECTION_INTERVAL == 1)
-            run_face_detection = (frame_count % FACE_DETECTION_INTERVAL == 1)
-            run_recognition = (frame_count % RECOGNITION_INTERVAL == 1)
+            run_detection = (frame_count % DETECTION_INTERVAL == 0)
+            run_recognition = (frame_count % RECOGNITION_INTERVAL == 0)
 
             if run_detection:
                 # Heavy: YOLO person detection + DeepSORT tracking update
@@ -140,6 +138,8 @@ def process_camera(camera_id: str):
                 for t in tracks:
                     track_id = t["id"]
                     current_ids.add(track_id)
+                    if track_id not in seen_track_ids:
+                        seen_track_ids.add(track_id)
                     new_bbox = t["bbox"]
                     
                     if track_id in track_states:
@@ -176,7 +176,6 @@ def process_camera(camera_id: str):
                 for tid in stale_ids:
                     del track_states[tid]
                     recognition_cache.pop(tid, None)
-                    face_bbox_cache.pop(tid, None)
             
             # Predict positions for all tracks using velocity (Kalman filter-like)
             frames_since_detection = frame_count - last_detection_frame
@@ -201,79 +200,45 @@ def process_camera(camera_id: str):
                 for state in track_states.values():
                     state["predicted_bbox"] = state["bbox"]
 
-            # Face detection on active tracks (periodic)
-            if run_face_detection:
-                for tid, state in list(track_states.items()):
-                    if not state["active"]:
-                        continue
-                    
-                    bbox = state["predicted_bbox"]
-                    bx1, by1, bx2, by2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-                    bx1, by1 = max(0, bx1), max(0, by1)
-                    bx2, by2 = min(w, bx2), min(h, by2)
-                    
-                    if bx2 - bx1 < 30 or by2 - by1 < 30:
-                        continue
-                    
-                    try:
-                        crop = frame[by1:by2, bx1:bx2]
-                        if crop.size > 0:
-                            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                            with recognizer.ai_lock:
-                                boxes, probs = recognizer.mtcnn.detect(crop_rgb)
-                            
-                            if isinstance(boxes, np.ndarray) and len(boxes) > 0:
-                                best_idx = int(np.argmax(probs)) if probs is not None else 0
-                                fx1, fy1, fx2, fy2 = boxes[best_idx]
-                                face_bbox = [
-                                    max(0, bx1 + int(fx1)),
-                                    max(0, by1 + int(fy1)),
-                                    min(w, bx1 + int(fx2)),
-                                    min(h, by1 + int(fy2))
-                                ]
-                                fw, fh = face_bbox[2] - face_bbox[0], face_bbox[3] - face_bbox[1]
-                                if fw >= 20 and fh >= 20:
-                                    face_bbox_cache[tid] = (face_bbox, frame_count)
-                    except Exception:
-                        pass
-            
-            # Prune old face cache
-            for tid in list(face_bbox_cache.keys()):
-                _, cache_frame = face_bbox_cache[tid]
-                if (frame_count - cache_frame) > FACE_CACHE_FRAMES:
-                    del face_bbox_cache[tid]
+            # No face detection stage — remove face tracking entirely
 
             # Face recognition (periodic)
             if run_recognition:
                 for tid, state in track_states.items():
                     if not state["active"]:
                         continue
-                    
-                    # Check if we have a recent face detection
-                    if tid in face_bbox_cache:
-                        face_bbox, face_frame = face_bbox_cache[tid]
-                        
-                        # Check recognition cache
-                        cached = recognition_cache.get(tid)
-                        if cached:
-                            cached_name, cached_conf, cached_frame = cached
-                            cache_age = frame_count - cached_frame
-                            
-                            if cache_age < RECOGNITION_CACHE_FRAMES:
-                                # Still valid, skip re-recognition
-                                continue
-                        
-                        # Run recognition
-                        try:
-                            name, conf = recognizer.recognize(frame, face_bbox)
-                            if name != "Unknown" and conf > 0.35:
-                                recognition_cache[tid] = (name, conf, frame_count)
-                                print(f"[Camera:{camera_id}] Recognized: {name} (conf: {conf:.2f})")
-                            elif tid in recognition_cache:
-                                # Recognition failed, keep cache for now
-                                pass
-                        except Exception:
+                    # Check recognition cache staleness
+                    cached = recognition_cache.get(tid)
+                    if cached:
+                        cached_name, cached_conf, cached_frame = cached
+                        cache_age = frame_count - cached_frame
+                        if cache_age < RECOGNITION_CACHE_FRAMES:
+                            continue
+                    # Approximate face region from the body bbox (upper portion)
+                    bb = state.get("predicted_bbox", state["bbox"])
+                    bx1, by1, bx2, by2 = int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])
+                    bx1, by1 = max(0, bx1), max(0, by1)
+                    bx2, by2 = min(w, bx2), min(h, by2)
+                    bw = max(0, bx2 - bx1)
+                    bh = max(0, by2 - by1)
+                    if bw < 20 or bh < 20:
+                        continue
+                    fx1 = bx1 + int(0.15 * bw)
+                    fx2 = bx2 - int(0.15 * bw)
+                    fy1 = by1
+                    fy2 = by1 + int(0.45 * bh)
+                    fx1, fy1 = max(0, fx1), max(0, fy1)
+                    fx2, fy2 = min(w, fx2), min(h, fy2)
+                    if fx2 - fx1 < 20 or fy2 - fy1 < 20:
+                        continue
+                    try:
+                        name, conf = recognizer.recognize(frame, [fx1, fy1, fx2, fy2])
+                        if name != "Unknown" and conf > 0.35:
+                            recognition_cache[tid] = (name, conf, frame_count)
+                        elif tid in recognition_cache:
                             pass
+                    except Exception:
+                        pass
 
             # Build render data from track states
             processed = []
@@ -298,15 +263,9 @@ def process_camera(camera_id: str):
                     if (frame_count - cached_frame) < RECOGNITION_CACHE_FRAMES:
                         name, conf = cached_name, cached_conf
 
-                # Get face bbox
-                face_bbox = None
-                if tid in face_bbox_cache:
-                    face_bbox, _ = face_bbox_cache[tid]
-
                 processed.append({
                     "id": tid,
                     "bbox": [bx1, by1, bx2, by2],
-                    "face_bbox": face_bbox,
                     "name": name,
                     "confidence": conf
                 })
@@ -319,18 +278,28 @@ def process_camera(camera_id: str):
                 for t in processed:
                     track_key = (camera_id, t["id"])
                     if track_key not in search.get("found_track_ids", set()):
-                        if t.get("face_bbox") is not None and t["name"] == "Unknown":
+                        if t["name"] == "Unknown":
+                            bx1, by1, bx2, by2 = t["bbox"]
+                            bw = max(0, bx2 - bx1)
+                            bh = max(0, by2 - by1)
+                            fx1 = bx1 + int(0.15 * bw)
+                            fx2 = bx2 - int(0.15 * bw)
+                            fy1 = by1
+                            fy2 = by1 + int(0.45 * bh)
+                            fx1, fy1 = max(0, fx1), max(0, fy1)
+                            fx2, fy2 = min(frame.shape[1]-1, fx2), min(frame.shape[0]-1, fy2)
+                            face_box_guess = [fx1, fy1, fx2, fy2]
                             threading.Thread(
                                 target=recognition_worker,
-                                args=(frame.copy(), t["face_bbox"], t["id"], camera_id, recognition_cache),
+                                args=(frame.copy(), face_box_guess, t["id"], camera_id, recognition_cache),
                                 daemon=True
                             ).start()
 
-            # Render at 60 FPS - every frame gets overlay
+            # Render at full rate - every frame gets overlay
             record_frame = frame.copy()
+            people_count = 0
             for t in processed:
                 bx1, by1, bx2, by2 = t["bbox"]
-                face_bbox = t.get("face_bbox")
                 name = str(t["name"])
                 conf = float(t["confidence"])
                 tid = str(t["id"])
@@ -341,16 +310,19 @@ def process_camera(camera_id: str):
                 else:
                     body_color = (0, 165, 255)  # Orange
                     label = f"Person {tid}"
-                
+                people_count += 1
                 # Thicker lines for better visibility
                 cv2.rectangle(record_frame, (bx1, by1), (bx2, by2), body_color, 3)
                 cv2.putText(record_frame, label, (bx1, max(by1 - 10, 25)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, body_color, 2)
-
-                if face_bbox:
-                    face_color = (0, 255, 255) if name != "Unknown" else (255, 255, 0)
-                    cv2.rectangle(record_frame, (face_bbox[0], face_bbox[1]), 
-                                  (face_bbox[2], face_bbox[3]), face_color, 2)
+            if occupancy_last_count.get(camera_id) != people_count:
+                occupancy_last_count[camera_id] = people_count
+                try:
+                    db_manager.log_occupancy(camera_id, people_count)
+                except Exception:
+                    pass
+            cv2.putText(record_frame, f"Count: {people_count}  Total: {len(seen_track_ids)}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
             # Output at full frame rate
             with results_lock:
@@ -413,8 +385,20 @@ def recognition_worker(frame, face_bbox, track_id, camera_id, recognition_cache)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    cameras = camera_manager.get_active_cameras()
-    return templates.TemplateResponse("index.html", {"request": request, "cameras": cameras})
+    # Paginated feeds
+    try:
+        page = int(request.query_params.get("page", "1"))
+        per_page = int(request.query_params.get("per_page", "4"))
+    except Exception:
+        page, per_page = 1, 4
+    cameras_all = camera_manager.get_active_cameras()
+    total = len(cameras_all)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    end = start + per_page
+    cameras = cameras_all[start:end]
+    return templates.TemplateResponse("index.html", {"request": request, "cameras": cameras, "page": page, "total_pages": total_pages, "per_page": per_page, "total": total})
 
 
 @app.get("/search", response_class=HTMLResponse)
@@ -425,6 +409,13 @@ async def search_page(request: Request):
 async def recordings_page(request: Request):
     return templates.TemplateResponse("recordings.html", {"request": request})
 
+@app.get("/people", response_class=HTMLResponse)
+async def people_page(request: Request):
+    return templates.TemplateResponse("people.html", {"request": request})
+
+@app.get("/cameras", response_class=HTMLResponse)
+async def cameras_page(request: Request):
+    return templates.TemplateResponse("cameras.html", {"request": request})
 @app.post("/register")
 async def register_person(name: str = Form(...), file: UploadFile = File(...)):
     img_dir = f"dataset/{name}"
@@ -476,6 +467,11 @@ async def delete_camera(camera_id: str = Form(...)):
 @app.get("/api/cameras")
 async def api_cameras():
     return camera_manager.get_active_cameras()
+
+@app.get("/api/occupancy")
+async def api_occupancy(camera_id: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None):
+    rows = db_manager.search_occupancy(camera_id, start_time, end_time)
+    return [{"id": r[0], "camera_id": r[1], "timestamp": r[2], "count": r[3]} for r in rows]
 
 # ---------------------------------------------------------------------------
 # Recording API
@@ -897,9 +893,7 @@ def gen_frames(camera_id: str):
             data = camera_results.get(camera_id, {})
             frame = data.get("rendered_frame")
             frame_id = data.get("frame_id", -1)
-            
         if frame is None or frame_id == last_sent_id:
-            time.sleep(0.005)  # 5ms check loop
             continue
             
         last_sent_id = frame_id
@@ -919,11 +913,4 @@ async def video_feed(camera_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    camera_manager.add_camera("Webcam", 0)
-    threading.Thread(target=process_camera, args=("Webcam",), daemon=True).start()
-
-    rtsp_url = sanitize_rtsp_url("rtsp://test:dei@12@12@10.7.16.48:554")
-    camera_manager.add_camera("RTSP_Cam", rtsp_url)
-    threading.Thread(target=process_camera, args=("RTSP_Cam",), daemon=True).start()
-
     uvicorn.run(app, host="0.0.0.0", port=8000)

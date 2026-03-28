@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vigilance - People</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <div class="logo">AI VIGILANCE</div>
+        <nav>
+            <a href="/">Feeds</a>
+            <a href="/people" class="active">People</a>
+            <a href="/cameras">Cameras</a>
+            <a href="/search">Search</a>
+            <a href="/recordings_page">Recordings</a>
+        </nav>
+    </header>
+    <main>
+        <div class="sidebar" style="width:100%; max-width:600px;">
+            <section class="registration">
+                <h2>Register Person</h2>
+                <form id="register-form">
+                    <input type="text" name="name" placeholder="Full Name" required>
+                    <input type="file" name="file" accept="image/*" required>
+                    <button type="submit">Register</button>
+                </form>
+                <div id="reg-status"></div>
+            </section>
+        </div>
+        <div class="dashboard">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+                <h2 style="margin:0;">Registered Persons</h2>
+            </div>
+            <div id="persons-list" class="results-grid">
+                <p style="color:#666;">Loading registered persons...</p>
+            </div>
+        </div>
+    </main>
+    <script type="module" src="/static/script.js"></script>
+</body>
+</html>
