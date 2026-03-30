@@ -14,6 +14,7 @@ from cameras.camera_manager import CameraManager
 import threading
 import time
 import urllib.parse
+import torch
 from typing import Dict, Any, Optional
 
 # ---------------------------------------------------------------------------
@@ -89,33 +90,32 @@ def process_camera(camera_id: str):
     - Rendering happens every frame at 60 FPS with interpolated positions
     """
     print(f"[process_camera] Thread started for: {camera_id}")
-    tracker: Any = ObjectTracker()
+    tracker: ObjectTracker = ObjectTracker()
     last_frame_id: int = -1
     frame_count: int = 0
     
-    # Processing intervals (heavier CPU utilization per request)
-    DETECTION_INTERVAL = 1       # Run YOLO detection every frame
-    RECOGNITION_INTERVAL = 30     # Run face recognition periodically
+    # Processing intervals: Run YOLO every 3 frames for better matching.
+    DETECTION_INTERVAL: int = 3
+    RECOGNITION_INTERVAL: int = 45
     
     # Recognition cache: track_id -> (name, confidence, frame_number)
-    RECOGNITION_CACHE_FRAMES = 60  # Cache valid for 60 frames (~1 second at 60 FPS)
+    RECOGNITION_CACHE_FRAMES: int = 120  # Cache valid for 120 frames (~2-4 seconds)
     recognition_cache: Dict[Any, tuple] = {}  # track_id -> (name, conf, frame_num)
     
     # Unique people seen on this camera (cumulative unique track IDs)
-    seen_track_ids = set()
-    
-    # Track state for smooth rendering
-    # track_id -> {"bbox": [x1,y1,x2,y2], "velocity": [vx,vy,vx,vy], "last_update": frame_num}
-    track_states: Dict[Any, dict] = {}
+    seen_track_ids: set = set()
+    # Frame number when an ID was first seen, for stability filtering
+    birth_frames: Dict[Any, int] = {}
     
     # Last detection results
-    last_detections = []
-    last_detection_frame = 0
+    last_detections: list = []
+    last_detection_frame: int = 0
 
     while True:
         frame, frame_id = camera_manager.get_camera_frame_with_id(camera_id)
         if frame is None or frame_id == last_frame_id:
-            continue  # No sleep - keep looping for max FPS
+            time.sleep(0.001)  # Fix: Prevent 100% CPU spinning when idle
+            continue
         last_frame_id = frame_id
         frame_count += 1
 
@@ -126,149 +126,88 @@ def process_camera(camera_id: str):
             run_detection = (frame_count % DETECTION_INTERVAL == 0)
             run_recognition = (frame_count % RECOGNITION_INTERVAL == 0)
 
+            # 1. AI Processing with internal prediction
+            # YOLO runs every 5 frames; DeepSort updates every frame for smooth motion
+            detections = []
             if run_detection:
-                # Heavy: YOLO person detection + DeepSORT tracking update
                 detections = detector.detect(frame)
-                tracks = tracker.update(detections, frame)
-                last_detections = tracks
-                last_detection_frame = frame_count
-                
-                # Update track states with new detections
-                current_ids = set()
-                for t in tracks:
-                    track_id = t["id"]
-                    current_ids.add(track_id)
-                    if track_id not in seen_track_ids:
-                        seen_track_ids.add(track_id)
-                    new_bbox = t["bbox"]
-                    
-                    if track_id in track_states:
-                        old_bbox = track_states[track_id]["bbox"]
-                        # Calculate velocity for prediction
-                        velocity = [
-                            new_bbox[0] - old_bbox[0],
-                            new_bbox[1] - old_bbox[1],
-                            new_bbox[2] - old_bbox[2],
-                            new_bbox[3] - old_bbox[3]
-                        ]
-                        track_states[track_id] = {
-                            "bbox": new_bbox,
-                            "velocity": velocity,
-                            "last_update": frame_count,
-                            "active": True
-                        }
-                    else:
-                        track_states[track_id] = {
-                            "bbox": new_bbox,
-                            "velocity": [0, 0, 0, 0],
-                            "last_update": frame_count,
-                            "active": True
-                        }
-                
-                # Mark tracks not detected as inactive
-                for tid in track_states:
-                    if tid not in current_ids:
-                        track_states[tid]["active"] = False
-                
-                # Remove very stale tracks (not updated for 90 frames)
-                stale_ids = [tid for tid, state in track_states.items() 
-                            if not state["active"] and (frame_count - state["last_update"]) > 90]
-                for tid in stale_ids:
-                    del track_states[tid]
-                    recognition_cache.pop(tid, None)
             
-            # Predict positions for all tracks using velocity (Kalman filter-like)
-            frames_since_detection = frame_count - last_detection_frame
-            if frames_since_detection > 0:
-                for tid, state in track_states.items():
-                    if state["active"]:
-                        # Predict new position based on velocity
-                        v = state["velocity"]
-                        old_bbox = state["bbox"]
-                        # Apply velocity with damping to reduce drift
-                        damping = 0.95 ** frames_since_detection
-                        predicted_bbox = [
-                            old_bbox[0] + v[0] * damping,
-                            old_bbox[1] + v[1] * damping,
-                            old_bbox[2] + v[2] * damping,
-                            old_bbox[3] + v[3] * damping
-                        ]
-                        state["predicted_bbox"] = predicted_bbox
-                    else:
-                        state["predicted_bbox"] = state["bbox"]
-            else:
-                for state in track_states.values():
-                    state["predicted_bbox"] = state["bbox"]
+            # DeepSort internal Kalman filter handles position prediction during 'empty' frames
+            tracks = tracker.update(detections, frame)
 
-            # No face detection stage — remove face tracking entirely
-
-            # Face recognition (periodic)
-            if run_recognition:
-                for tid, state in track_states.items():
-                    if not state["active"]:
-                        continue
-                    # Check recognition cache staleness
-                    cached = recognition_cache.get(tid)
-                    if cached:
-                        cached_name, cached_conf, cached_frame = cached
-                        cache_age = frame_count - cached_frame
-                        if cache_age < RECOGNITION_CACHE_FRAMES:
-                            continue
-                    # Approximate face region from the body bbox (upper portion)
-                    bb = state.get("predicted_bbox", state["bbox"])
-                    bx1, by1, bx2, by2 = int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])
-                    bx1, by1 = max(0, bx1), max(0, by1)
-                    bx2, by2 = min(w, bx2), min(h, by2)
-                    bw = max(0, bx2 - bx1)
-                    bh = max(0, by2 - by1)
-                    if bw < 20 or bh < 20:
-                        continue
-                    fx1 = bx1 + int(0.15 * bw)
-                    fx2 = bx2 - int(0.15 * bw)
-                    fy1 = by1
-                    fy2 = by1 + int(0.45 * bh)
-                    fx1, fy1 = max(0, fx1), max(0, fy1)
-                    fx2, fy2 = min(w, fx2), min(h, fy2)
-                    if fx2 - fx1 < 20 or fy2 - fy1 < 20:
-                        continue
-                    try:
-                        name, conf = recognizer.recognize(frame, [fx1, fy1, fx2, fy2])
-                        if name != "Unknown" and conf > 0.35:
-                            recognition_cache[tid] = (name, conf, frame_count)
-                        elif tid in recognition_cache:
-                            pass
-                    except Exception:
-                        pass
-
-            # Build render data from track states
+            # 2. Update tracking state for cumulative counting and rendering
             processed = []
-            for tid, state in track_states.items():
-                bbox = state["predicted_bbox"]
-                bx1 = max(0, int(bbox[0]))
-                by1 = max(0, int(bbox[1]))
-                bx2 = min(w - 1, int(bbox[2]))
-                by2 = min(h - 1, int(bbox[3]))
+            for t in tracks:
+                track_id = t["id"]
+                bbox = t["bbox"] # Latest position (detected or predicted)
                 
-                box_w = bx2 - bx1
-                box_h = by2 - by1
-                if box_w < 20 or box_h < 20:
-                    continue
-                if box_w > w * 0.95 or box_h > h * 0.95:
-                    continue
-
-                # Get recognition result
+                # Headcount Stability: Only count for 'Total' if seen for at least 20 frames
+                if track_id not in birth_frames:
+                    birth_frames[track_id] = frame_count
+                
+                # Check persistence (approx 0.3s-0.5s at 60 FPS)
+                is_stable = (frame_count - birth_frames[track_id]) > 20
+                if is_stable and track_id not in seen_track_ids:
+                    seen_track_ids.add(track_id)
+                
+                # Active Search / Recognition check (cached)
                 name, conf = "Unknown", 0.0
-                if tid in recognition_cache:
-                    cached_name, cached_conf, cached_frame = recognition_cache[tid]
+                if track_id in recognition_cache:
+                    cached_name, cached_conf, cached_frame = recognition_cache[track_id]
                     if (frame_count - cached_frame) < RECOGNITION_CACHE_FRAMES:
                         name, conf = cached_name, cached_conf
 
                 processed.append({
-                    "id": tid,
-                    "bbox": [bx1, by1, bx2, by2],
+                    "id": track_id,
+                    "bbox": bbox,
                     "name": name,
-                    "confidence": conf
+                    "confidence": conf,
+                    "stable": is_stable
                 })
+
+            # Non-Maximum Suppression (Overlapping Box Kill)
+            # If two boxes overlap > 70%, remove the newer one to fix 'Double Boxes'
+            final_processed = []
+            processed = sorted(processed, key=lambda x: x["id"])
+            for i, p1 in enumerate(processed):
+                keep = True
+                for j, p2 in enumerate(final_processed):
+                    # Simple IOU check
+                    box1, box2 = p1["bbox"], p2["bbox"]
+                    ix1, iy1 = max(box1[0], box2[0]), max(box1[1], box2[1])
+                    ix2, iy2 = min(box1[2], box2[2]), min(box1[3], box2[3])
+                    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+                    inter = iw * ih
+                    area1 = (box1[2]-box1[0]) * (box1[3]-box1[1])
+                    area2 = (box2[2]-box2[0]) * (box2[3]-box2[1])
+                    union = area1 + area2 - inter
+                    iou = inter / union if union > 0 else 0
+                    if iou > 0.7:
+                        keep = False
+                        break
+                if keep:
+                    final_processed.append(p1)
+            processed = final_processed
+
+            # Face recognition logic (periodic and non-blocking)
+            if run_recognition:
+                for t in processed:
+                    tid = t["id"]
+                    # Skip if already being processed or not due yet
+                    if tid in recognition_cache and (frame_count - recognition_cache[tid][2]) < RECOGNITION_CACHE_FRAMES:
+                        continue
+                    
+                    # Offload heavy biometric check to background thread
+                    bx1, by1, bx2, by2 = int(t["bbox"][0]), int(t["bbox"][1]), int(t["bbox"][2]), int(t["bbox"][3])
+                    bw, bh = max(0, bx2 - bx1), max(0, by2 - by1)
+                    if bw < 30 or bh < 30: continue
+                    
+                    face_box = [bx1 + int(0.15 * bw), by1, bx2 - int(0.15 * bw), by1 + int(0.45 * bh)]
+                    threading.Thread(
+                        target=self_recognition_worker,
+                        args=(frame.copy(), face_box, tid, recognition_cache, frame_count),
+                        daemon=True
+                    ).start()
 
             # Active search check
             with active_search_lock:
@@ -337,6 +276,16 @@ def process_camera(camera_id: str):
         except Exception as e:
             print(f"[process_camera:{camera_id}] {e}")
             import traceback; traceback.print_exc()
+
+
+def self_recognition_worker(frame, face_box, track_id, recognition_cache, frame_count):
+    """Background task for periodic biometric verification."""
+    try:
+        name, conf = recognizer.recognize(frame, face_box)
+        if name != "Unknown" and conf > 0.35:
+            recognition_cache[track_id] = (name, conf, frame_count)
+    except Exception:
+        pass
 
 
 def recognition_worker(frame, face_bbox, track_id, camera_id, recognition_cache):
@@ -894,11 +843,25 @@ def gen_frames(camera_id: str):
             frame = data.get("rendered_frame")
             frame_id = data.get("frame_id", -1)
         if frame is None or frame_id == last_sent_id:
+            time.sleep(0.01)  # Fix: Stop CPU spinning on streaming threads
             continue
             
         last_sent_id = frame_id
 
-        ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        # -------------------------------------------------------------------
+        # NETWORK OPTIMIZATION: Scale down for "Buttery Smooth" streaming
+        # Full 1080p JPEG streaming is too heavy (1 FPS bottleneck)
+        # 720p (1280px) or 480p (854px) is perfect for fluid browser monitoring
+        # -------------------------------------------------------------------
+        h, w = frame.shape[:2]
+        target_w = 1280
+        if w > target_w:
+            scale = target_w / w
+            target_h = int(h * scale)
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        # Lower quality slightly to reduce bandwidth pressure (40 is plenty for monitoring)
+        ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
         yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
 
 

@@ -10,7 +10,8 @@ class CameraHandler:
     def __init__(self, camera_id, source):
         self.camera_id = camera_id
         self.source = source
-        self.cap = cv2.VideoCapture(source)
+        self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        # Force low-latency and no buffering (crucial for 60-90 FPS feel)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.frame = None
         self.frame_id = 0
@@ -22,32 +23,33 @@ class CameraHandler:
     def _update(self):
         fails = 0
         while self.running:
-            ret, frame = self.cap.read()
-            if not ret:
+            # Capture frame; use grab/retrieve for better performance on some streams
+            if not self.cap.grab():
+                time.sleep(0.1)
                 fails += 1
-                if fails > 30:  # Allow 30 retries (approx 1 second interval) before giving up
+                if fails > 100:
                     # Reconnect logic for RTSP
                     self.cap.release()
                     time.sleep(1)
-                    self.cap = cv2.VideoCapture(self.source)
+                    self.cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
                     self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     fails = 0
-                else:
-                    time.sleep(0.05)
                 continue
             
+            ret, frame = self.cap.retrieve()
+            if ret:
+                with self.lock:
+                    self.frame = frame
+                    self.frame_id += 1
             fails = 0
-            with self.lock:
-                self.frame = frame
-                self.frame_id += 1
 
     def get_frame(self):
         with self.lock:
-            return self.frame.copy() if self.frame is not None else None
+            return self.frame if self.frame is not None else None
 
     def get_frame_with_id(self):
         with self.lock:
-            return (self.frame.copy(), self.frame_id) if self.frame is not None else (None, 0)
+            return (self.frame, self.frame_id) if self.frame is not None else (None, 0)
 
     def stop(self):
         self.running = False
