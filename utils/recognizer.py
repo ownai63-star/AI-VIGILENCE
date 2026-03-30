@@ -71,7 +71,7 @@ class FaceRecognizer:
         with self.ai_lock:
             boxes, _ = self.mtcnn.detect(image_rgb)
         
-        if boxes is not None and hasattr(boxes, "__len__") and len(list(boxes)) > 0:
+        if boxes is not None and len(boxes) > 0:
             fx1, fy1, fx2, fy2 = [int(b) for b in boxes[0]]
             face_crop = image_rgb[max(0, fy1):max(0, fy2), max(0, fx1):max(0, fx2)]
             if face_crop.size > 0:

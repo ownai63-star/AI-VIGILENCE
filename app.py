@@ -43,24 +43,10 @@ os.makedirs("snapshots", exist_ok=True)
 os.makedirs("dataset", exist_ok=True)
 os.makedirs("recordings", exist_ok=True)
 
-app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
-app.mount("/dataset", StaticFiles(directory="dataset"), name="dataset")
-app.mount("/recordings", StaticFiles(directory="recordings"), name="recordings")
-# Configure Jinja2 templates with no cache to avoid errors
-from jinja2 import FileSystemLoader, Environment as JinjaEnvironment
-template_env = JinjaEnvironment(loader=FileSystemLoader("templates"), auto_reload=True)
-templates = Jinja2Templates(env=template_env)
+from contextlib import asynccontextmanager
 
-db_manager = DatabaseManager()
-detector = PersonDetector()
-recognizer = FaceRecognizer()
-camera_manager = CameraManager()
-recognizer.load_known_faces(db_manager)
-
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """Reload all saved cameras from the database on startup."""
     print("[Startup] Loading persistent cameras from database...")
     cameras = db_manager.get_cameras()
@@ -73,6 +59,25 @@ async def startup_event():
         if camera_manager.add_camera(cam_id, parsed_source):
              threading.Thread(target=process_camera, args=(cam_id,), daemon=True).start()
              print(f"[Startup] Restored camera: {cam_id}")
+    yield
+
+app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
+app.mount("/dataset", StaticFiles(directory="dataset"), name="dataset")
+app.mount("/recordings", StaticFiles(directory="recordings"), name="recordings")
+
+# Configure Jinja2 templates with no cache to avoid errors
+from jinja2 import FileSystemLoader, Environment as JinjaEnvironment
+template_env = JinjaEnvironment(loader=FileSystemLoader("templates"), auto_reload=True)
+from fastapi.templating import Jinja2Templates
+templates = Jinja2Templates(env=template_env)
+
+db_manager = DatabaseManager()
+detector = PersonDetector()
+recognizer = FaceRecognizer()
+camera_manager = CameraManager()
+recognizer.load_known_faces(db_manager)
 
 # ---------------------------------------------------------------------------
 # Shared state
