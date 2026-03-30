@@ -50,7 +50,9 @@ class FaceRecognizer:
                     embedding = self.resnet(face_tensor).cpu().numpy()[0]
             
             if self.known_face_encodings:
-                distances = np.linalg.norm(self.known_face_encodings - embedding, axis=1)
+                # Convert list to array for vectorized subtraction
+                encodings_arr = np.array(self.known_face_encodings)
+                distances = np.linalg.norm(encodings_arr - embedding, axis=1)
                 min_idx = np.argmin(distances)
                 # Lowered threshold to 1.15 for better side/profile face detection
                 # Original was 1.0, increased to catch more angles

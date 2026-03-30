@@ -9,16 +9,16 @@ class ObjectTracker:
             max_age=max_age, 
             n_init=n_init, 
             max_iou_distance=0.5, 
-            embedder=None
+            embedder='mobilenet',
+            bgr=True
         )
 
     def update(self, detections, frame=None):
         """
         detections: list of ([x1, y1, w, h], confidence, label)
         """
-        # Update deep_sort (uses internal Kalman Filter for smoothness)
-        # Note: frame is ignored since embedder is None, saving CPU/Memory
-        tracks = self.tracker.update_tracks(detections, frame=None)
+        # Update deep_sort using internal 'mobilenet' embedder
+        tracks = self.tracker.update_tracks(detections, frame=frame)
         
         active_results = []
         for track in tracks:

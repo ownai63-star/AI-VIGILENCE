@@ -50,7 +50,35 @@ class DatabaseManager:
                     count INTEGER
                 )
             ''')
+            # Table for camera persistence
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cameras (
+                    camera_id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL
+                )
+            ''')
             conn.commit()
+
+    def add_camera_to_db(self, camera_id, source):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO cameras (camera_id, source) VALUES (?, ?)',
+                (camera_id, str(source))
+            )
+            conn.commit()
+
+    def remove_camera_from_db(self, camera_id):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM cameras WHERE camera_id = ?', (camera_id,))
+            conn.commit()
+
+    def get_cameras(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM cameras')
+            return cursor.fetchall()
 
     def register_person(self, name, image_path, encoding):
         with self.get_connection() as conn:

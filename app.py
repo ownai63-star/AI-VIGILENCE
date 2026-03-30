@@ -59,6 +59,21 @@ recognizer = FaceRecognizer()
 camera_manager = CameraManager()
 recognizer.load_known_faces(db_manager)
 
+@app.on_event("startup")
+async def startup_event():
+    """Reload all saved cameras from the database on startup."""
+    print("[Startup] Loading persistent cameras from database...")
+    cameras = db_manager.get_cameras()
+    for cam_id, source in cameras:
+        # Handle webcam IDs stored as strings
+        parsed_source = source
+        if str(source).isdigit():
+            parsed_source = int(source)
+        
+        if camera_manager.add_camera(cam_id, parsed_source):
+             threading.Thread(target=process_camera, args=(cam_id,), daemon=True).start()
+             print(f"[Startup] Restored camera: {cam_id}")
+
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
@@ -400,6 +415,7 @@ async def add_camera(camera_id: str = Form(...), camera_type: str = Form(...), s
             parsed = f"http://{source}:8080/video" if ":" not in source else f"http://{source}/video"
 
     if camera_manager.add_camera(camera_id, parsed):
+        db_manager.add_camera_to_db(camera_id, parsed)
         threading.Thread(target=process_camera, args=(camera_id,), daemon=True).start()
         return {"status": "success"}
     return {"status": "error", "message": "Camera already exists or could not connect."}
@@ -408,6 +424,7 @@ async def add_camera(camera_id: str = Form(...), camera_type: str = Form(...), s
 @app.post("/delete_camera")
 async def delete_camera(camera_id: str = Form(...)):
     if camera_manager.remove_camera(camera_id):
+        db_manager.remove_camera_from_db(camera_id)
         camera_results.pop(camera_id, None)
         return {"status": "success"}
     return {"status": "error"}
