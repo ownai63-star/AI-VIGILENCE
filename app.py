@@ -13,7 +13,6 @@ from utils.recognizer import FaceRecognizer
 from cameras.camera_manager import CameraManager
 import threading
 import time
-import torch
 from typing import Dict, Any, Optional
 
 # ---------------------------------------------------------------------------
@@ -84,11 +83,9 @@ app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
 app.mount("/dataset", StaticFiles(directory="dataset"), name="dataset")
 app.mount("/recordings", StaticFiles(directory="recordings"), name="recordings")
 
-# Configure Jinja2 templates with no cache to avoid errors
-from jinja2 import FileSystemLoader, Environment as JinjaEnvironment
-template_env = JinjaEnvironment(loader=FileSystemLoader("templates"), auto_reload=True)
-from fastapi.templating import Jinja2Templates
-templates = Jinja2Templates(env=template_env)
+# Configure Jinja2 templates with cache disabled to avoid unhashable type error
+templates = Jinja2Templates(directory="templates")
+templates.env.cache_size = 0
 
 db_manager = DatabaseManager()
 detector = PersonDetector()
@@ -127,6 +124,15 @@ def process_camera(camera_id: str):
     - Rendering happens every frame at 60 FPS with interpolated positions
     """
     print(f"[process_camera] Thread started for: {camera_id}")
+    
+    # Wait for camera to be ready
+    warmup_frames = 0
+    while warmup_frames < 30:
+        frame, _ = camera_manager.get_camera_frame_with_id(camera_id)
+        if frame is not None:
+            warmup_frames += 1
+        time.sleep(0.1)
+    print(f"[process_camera:{camera_id}] Camera warmed up, starting processing")
     tracker: ObjectTracker = ObjectTracker()
     last_frame_id: int = -1
     frame_count: int = 0
@@ -168,6 +174,8 @@ def process_camera(camera_id: str):
             detections = []
             if run_detection:
                 detections = detector.detect(frame)
+                if frame_count % 30 == 0:  # Log every 30 detection frames
+                    print(f"[process_camera:{camera_id}] Frame {frame_count}: {len(detections)} detections")
             
             # DeepSort internal Kalman filter handles position prediction during 'empty' frames
             tracks = tracker.update(detections, frame)
@@ -384,24 +392,24 @@ async def index(request: Request):
     start = (page - 1) * per_page
     end = start + per_page
     cameras = cameras_all[start:end]
-    return templates.TemplateResponse("index.html", {"request": request, "cameras": cameras, "page": page, "total_pages": total_pages, "per_page": per_page, "total": total})
+    return templates.TemplateResponse(request, "index.html", {"cameras": cameras, "page": page, "total_pages": total_pages, "per_page": per_page, "total": total})
 
 
 @app.get("/search", response_class=HTMLResponse)
 async def search_page(request: Request):
-    return templates.TemplateResponse("search.html", {"request": request})
+    return templates.TemplateResponse(request, "search.html", {})
 
 @app.get("/recordings_page", response_class=HTMLResponse)
 async def recordings_page(request: Request):
-    return templates.TemplateResponse("recordings.html", {"request": request})
+    return templates.TemplateResponse(request, "recordings.html", {})
 
 @app.get("/people", response_class=HTMLResponse)
 async def people_page(request: Request):
-    return templates.TemplateResponse("people.html", {"request": request})
+    return templates.TemplateResponse(request, "people.html", {})
 
 @app.get("/cameras", response_class=HTMLResponse)
 async def cameras_page(request: Request):
-    return templates.TemplateResponse("cameras.html", {"request": request})
+    return templates.TemplateResponse(request, "cameras.html", {})
 @app.post("/register")
 async def register_person(name: str = Form(...), file: UploadFile = File(...)):
     img_dir = f"dataset/{name}"
