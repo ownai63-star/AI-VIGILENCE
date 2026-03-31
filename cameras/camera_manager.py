@@ -54,8 +54,10 @@ class CameraHandler:
         self.camera_id = camera_id
         self.source = source
         self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
-        # Force low-latency and no buffering (crucial for 60-90 FPS feel)
+        # Force low-latency and no buffering (crucial for smooth live streaming)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Set lower buffer for smoother streaming
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         self.frame = None
         self.frame_id = 0
         self.running = True
@@ -66,9 +68,10 @@ class CameraHandler:
     def _update(self):
         fails = 0
         while self.running:
-            # Capture frame; use grab/retrieve for better performance on some streams
-            if not self.cap.grab():
-                time.sleep(0.1)
+            # Read frame with minimal latency
+            ret, frame = self.cap.read()
+            if not ret:
+                time.sleep(0.001)
                 fails += 1
                 if fails > 100:
                     # Reconnect logic for RTSP
@@ -79,11 +82,9 @@ class CameraHandler:
                     fails = 0
                 continue
             
-            ret, frame = self.cap.retrieve()
-            if ret:
-                with self.lock:
-                    self.frame = frame
-                    self.frame_id += 1
+            with self.lock:
+                self.frame = frame
+                self.frame_id += 1
             fails = 0
 
     def get_frame(self):

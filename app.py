@@ -120,8 +120,9 @@ def process_camera(camera_id: str):
     
     Strategy:
     - Heavy processing (detection, face detection, recognition) runs every N frames
-    - DeepSORT tracker predicts positions between detection frames
+    - Tracker predicts positions between detection frames
     - Rendering happens every frame at 60 FPS with interpolated positions
+    - Optimized for 50-100 person crowd detection
     """
     print(f"[process_camera] Thread started for: {camera_id}")
     
@@ -133,31 +134,37 @@ def process_camera(camera_id: str):
             warmup_frames += 1
         time.sleep(0.1)
     print(f"[process_camera:{camera_id}] Camera warmed up, starting processing")
-    tracker: ObjectTracker = ObjectTracker()
+    
+    tracker: ObjectTracker = ObjectTracker(max_age=2, n_init=1, iou_threshold=0.3)
     last_frame_id: int = -1
     frame_count: int = 0
     
-    # Processing intervals: Run YOLO every 3 frames for better matching.
-    DETECTION_INTERVAL: int = 3
-    RECOGNITION_INTERVAL: int = 45
+    # Processing intervals
+    DETECTION_INTERVAL: int = 2  # Run YOLO every 2 frames for better tracking
+    RECOGNITION_INTERVAL: int = 60  # Recognition every 60 frames
     
     # Recognition cache: track_id -> (name, confidence, frame_number)
-    RECOGNITION_CACHE_FRAMES: int = 120  # Cache valid for 120 frames (~2-4 seconds)
-    recognition_cache: Dict[Any, tuple] = {}  # track_id -> (name, conf, frame_num)
+    RECOGNITION_CACHE_FRAMES: int = 180  # Cache valid for 180 frames (~3 seconds)
+    recognition_cache: Dict[Any, tuple] = {}
     
-    # Unique people seen on this camera (cumulative unique track IDs)
+    # Cumulative unique persons seen on this camera
     seen_track_ids: set = set()
-    # Frame number when an ID was first seen, for stability filtering
-    birth_frames: Dict[Any, int] = {}
     
     # Last detection results
     last_detections: list = []
     last_detection_frame: int = 0
 
+    # Target processing rate for smooth output
+    target_process_fps = 30
+    process_interval = 1.0 / target_process_fps
+    last_process_time = 0
+
     while True:
+        loop_start = time.time()
+        
         frame, frame_id = camera_manager.get_camera_frame_with_id(camera_id)
         if frame is None or frame_id == last_frame_id:
-            time.sleep(0.001)  # Fix: Prevent 100% CPU spinning when idle
+            time.sleep(0.001)
             continue
         last_frame_id = frame_id
         frame_count += 1
@@ -169,32 +176,27 @@ def process_camera(camera_id: str):
             run_detection = (frame_count % DETECTION_INTERVAL == 0)
             run_recognition = (frame_count % RECOGNITION_INTERVAL == 0)
 
-            # 1. AI Processing with internal prediction
-            # YOLO runs every 5 frames; DeepSort updates every frame for smooth motion
+            # 1. AI Processing
             detections = []
             if run_detection:
                 detections = detector.detect(frame)
-                if frame_count % 30 == 0:  # Log every 30 detection frames
-                    print(f"[process_camera:{camera_id}] Frame {frame_count}: {len(detections)} detections")
             
-            # DeepSort internal Kalman filter handles position prediction during 'empty' frames
+            # Update tracker with current detections
             tracks = tracker.update(detections, frame)
-            if frame_count % 30 == 0:
-                print(f"[process_camera:{camera_id}] Frame {frame_count}: {len(tracks)} confirmed tracks")
+            if frame_count % 60 == 0:  # Log every 60 frames (2 seconds at 30fps)
+                print(f"[process_camera:{camera_id}] detected: {len(detections)}, tracking: {len(tracks)}")
 
             # 2. Update tracking state for cumulative counting and rendering
             processed = []
+            current_track_ids = set()
+            
             for t in tracks:
                 track_id = t["id"]
-                bbox = t["bbox"] # Latest position (detected or predicted)
+                bbox = t["bbox"]  # Latest position
+                current_track_ids.add(track_id)
                 
-                # Headcount Stability: Only count for 'Total' if seen for at least 20 frames
-                if track_id not in birth_frames:
-                    birth_frames[track_id] = frame_count
-                
-                # Check persistence (approx 0.3s-0.5s at 60 FPS)
-                is_stable = (frame_count - birth_frames[track_id]) > 20
-                if is_stable and track_id not in seen_track_ids:
+                # Add to cumulative count immediately (no stability delay for crowds)
+                if track_id not in seen_track_ids:
                     seen_track_ids.add(track_id)
                 
                 # Active Search / Recognition check (cached)
@@ -209,7 +211,7 @@ def process_camera(camera_id: str):
                     "bbox": bbox,
                     "name": name,
                     "confidence": conf,
-                    "stable": is_stable
+                    "stable": True
                 })
 
             # Non-Maximum Suppression (Overlapping Box Kill)
@@ -283,32 +285,60 @@ def process_camera(camera_id: str):
 
             # Render at full rate - every frame gets overlay
             record_frame = frame.copy()
-            people_count = 0
+            people_count = len(processed)
+            
+            # Generate distinct colors for each person ID
+            def get_person_color(pid):
+                # Use HSV color space for distinct colors
+                hue = (pid * 137) % 180  # Golden angle approximation for good distribution
+                import cv2
+                hsv = np.uint8([[[hue, 255, 255]]])
+                rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]
+                return tuple(int(c) for c in rgb)
+            
             for t in processed:
-                bx1, by1, bx2, by2 = t["bbox"]
+                bx1, by1, bx2, by2 = [int(v) for v in t["bbox"]]
                 name = str(t["name"])
                 conf = float(t["confidence"])
-                tid = str(t["id"])
+                tid = int(t["id"])
 
                 if name != "Unknown":
-                    body_color = (0, 255, 0)  # Green
-                    label = f"{name} ({conf:.2f})"
+                    body_color = (0, 255, 0)  # Green for recognized
+                    label = f"{name}"
                 else:
-                    body_color = (0, 165, 255)  # Orange
-                    label = f"Person {tid}"
-                people_count += 1
-                # Thicker lines for better visibility
-                cv2.rectangle(record_frame, (bx1, by1), (bx2, by2), body_color, 3)
-                cv2.putText(record_frame, label, (bx1, max(by1 - 10, 25)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, body_color, 2)
+                    # Distinct color per person ID
+                    body_color = get_person_color(tid)
+                    # Only show ID for crowd management (no "Person" prefix to save space)
+                    label = f"#{tid}"
+                
+                # Ensure box is within frame bounds
+                h, w = record_frame.shape[:2]
+                bx1, by1 = max(0, bx1), max(0, by1)
+                bx2, by2 = min(w-1, bx2), min(h-1, by2)
+                
+                # Draw bounding box with thickness based on confidence
+                thickness = 2 if name == "Unknown" else 3
+                cv2.rectangle(record_frame, (bx1, by1), (bx2, by2), body_color, thickness)
+                
+                # Draw label background for readability
+                label_y = max(by1 - 5, 20)
+                (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                cv2.rectangle(record_frame, (bx1, label_y - text_h - 4), (bx1 + text_w, label_y + 4), (0, 0, 0), -1)
+                cv2.putText(record_frame, label, (bx1, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, body_color, 2)
+            
+            # Log occupancy if changed
             if occupancy_last_count.get(camera_id) != people_count:
                 occupancy_last_count[camera_id] = people_count
                 try:
                     db_manager.log_occupancy(camera_id, people_count)
                 except Exception:
                     pass
-            cv2.putText(record_frame, f"Count: {people_count}  Total: {len(seen_track_ids)}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+            
+            # Display count - only currently detected persons
+            count_text = f"Persons: {people_count}"
+            cv2.putText(record_frame, count_text, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
 
             # Output at full frame rate
             with results_lock:
@@ -319,6 +349,12 @@ def process_camera(camera_id: str):
                 writer_data = camera_writers.get(camera_id)
                 if writer_data and writer_data.get("writer"):
                     writer_data["writer"].write(record_frame)
+            
+            # Frame rate control for smooth 30 FPS output
+            elapsed = time.time() - loop_start
+            sleep_time = process_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
         except Exception as e:
             print(f"[process_camera:{camera_id}] {e}")
@@ -901,33 +937,91 @@ async def search_video_by_image(file: UploadFile = File(...), video_ids: str = F
 # ---------------------------------------------------------------------------
 
 def gen_frames(camera_id: str):
+    """Generate smooth MJPEG stream for live viewing."""
+    import cv2
+    import time
+    
     last_sent_id = -1
+    last_send_time = 0
+    target_fps = 30  # Target 30 FPS for smooth viewing
+    min_frame_interval = 1.0 / target_fps
+    
+    # Frame skip counter for smoother streaming under load
+    consecutive_drops = 0
+    max_consecutive_drops = 3
+    
     while True:
+        loop_start = time.time()
+        
         with results_lock:
             data = camera_results.get(camera_id, {})
             frame = data.get("rendered_frame")
             frame_id = data.get("frame_id", -1)
-        if frame is None or frame_id == last_sent_id:
-            time.sleep(0.01)  # Fix: Stop CPU spinning on streaming threads
+        
+        # Skip if no new frame
+        if frame is None:
+            time.sleep(0.001)
             continue
             
+        # Adaptive frame skipping: if we're falling behind, skip some frames
+        if frame_id == last_sent_id:
+            # No new frame yet, check if we should wait or continue
+            elapsed = time.time() - last_send_time
+            if elapsed < min_frame_interval:
+                time.sleep(max(0.001, min_frame_interval - elapsed))
+            continue
+        
+        # Check if we're getting frames too fast (adaptive throttling)
+        time_since_last = time.time() - last_send_time
+        if time_since_last < min_frame_interval and consecutive_drops < max_consecutive_drops:
+            # Skip this frame to maintain target FPS
+            consecutive_drops += 1
+            last_sent_id = frame_id
+            continue
+        
+        consecutive_drops = 0
         last_sent_id = frame_id
+        last_send_time = time.time()
 
         # -------------------------------------------------------------------
-        # NETWORK OPTIMIZATION: Scale down for "Buttery Smooth" streaming
-        # Full 1080p JPEG streaming is too heavy (1 FPS bottleneck)
-        # 720p (1280px) or 480p (854px) is perfect for fluid browser monitoring
+        # SMOOTH STREAMING OPTIMIZATION
+        # Balance quality vs latency for buttery smooth 30 FPS
         # -------------------------------------------------------------------
         h, w = frame.shape[:2]
+        
+        # Use 720p for good quality with smooth streaming
         target_w = 1280
         if w > target_w:
             scale = target_w / w
             target_h = int(h * scale)
+            # Use faster interpolation for streaming
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        # Lower quality slightly to reduce bandwidth pressure (40 is plenty for monitoring)
-        ret, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
-        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
+        # Optimize JPEG encoding for speed
+        # Quality 60 gives good visual quality with smaller size
+        encode_params = [
+            cv2.IMWRITE_JPEG_QUALITY, 60,
+            cv2.IMWRITE_JPEG_OPTIMIZE, 1,
+            cv2.IMWRITE_JPEG_PROGRESSIVE, 0  # Disable progressive for lower latency
+        ]
+        
+        ret, buffer = cv2.imencode(".jpg", frame, encode_params)
+        if not ret:
+            continue
+            
+        frame_bytes = buffer.tobytes()
+        
+        # Yield the frame with proper MIME boundaries
+        yield (b"--frame\r\n"
+               b"Content-Type: image/jpeg\r\n"
+               b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n"
+               b"\r\n" + frame_bytes + b"\r\n")
+        
+        # Ensure we don't exceed target FPS
+        elapsed = time.time() - loop_start
+        sleep_time = min_frame_interval - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 
 @app.get("/video_feed/{camera_id}")
