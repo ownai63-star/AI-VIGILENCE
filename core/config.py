@@ -36,4 +36,4 @@ STALE_TRACK_TIMEOUT = 180      # Frames to wait before deleting track (3s)
 # VIDEO RECORDING SETTINGS
 # ---------------------------------------------------------------------------
 RECORDING_FPS = 60.0           # Framerate for saved manual recordings
-RECORDING_CODEC = 'VP80'       # WebM compatible codec
+RECORDING_CODEC = 'VP80'       # WebM on Windows; falls back to mp4v on Linux headless

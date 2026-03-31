@@ -2,9 +2,52 @@ import cv2
 import threading
 import time
 import os
+import sys
 
 # Force OpenCV to use UDP and drop delay for RTSP streams
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp|fflags;nobuffer|flags;low_delay"
+
+# Suppress OpenCV GUI warnings on headless Linux
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+    os.environ.setdefault("DISPLAY", ":0")
+
+# Common RTSP stream paths to try when a bare IP is given (no path after port)
+RTSP_PROBE_PATHS = [
+    "",                                      # bare — try as-is first
+    "/axis-media/media.amp",                 # Axis
+    "/Streaming/Channels/101",               # Hikvision main
+    "/Streaming/Channels/1",                 # Hikvision alt
+    "/cam/realmonitor?channel=1&subtype=0",  # Dahua
+    "/stream1",                              # Generic
+    "/live/ch00_0",                          # Generic
+    "/h264/ch1/main/av_stream",              # Generic Hikvision
+    "/onvif-media/media.amp",                # ONVIF
+]
+
+def probe_rtsp_url(url: str) -> str:
+    """
+    If the RTSP URL has no path (just host:port), try common stream paths
+    and return the first one that opens successfully. Returns original if none work.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    # If there's already a meaningful path, don't probe
+    if parsed.path and parsed.path not in ("", "/"):
+        return url
+
+    base = url.rstrip("/")
+    for path in RTSP_PROBE_PATHS:
+        candidate = base + path
+        cap = cv2.VideoCapture(candidate, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        opened = cap.isOpened()
+        cap.release()
+        if opened:
+            print(f"[CameraProbe] Found working path: {candidate}")
+            return candidate
+
+    print(f"[CameraProbe] No working path found for {url}, using as-is")
+    return url
 
 class CameraHandler:
     def __init__(self, camera_id, source):
@@ -63,6 +106,9 @@ class CameraManager:
 
     def add_camera(self, camera_id, source):
         if camera_id not in self.cameras:
+            # For bare RTSP URLs, auto-discover the correct stream path
+            if isinstance(source, str) and source.startswith("rtsp://"):
+                source = probe_rtsp_url(source)
             handler = CameraHandler(camera_id, source)
             self.cameras[camera_id] = handler
             return True

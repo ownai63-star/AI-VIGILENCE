@@ -42,26 +42,43 @@ A high-performance, production-ready real-time surveillance dashboard. Built spe
 
 ## 🛠️ Setup Instructions
 
-### 1. Configure the Virtual Environment
-Ensure you are using a localized virtual environment so your IDE (like VS Code) correctly maps dependencies without import errors.
+### Windows
 
 ```bash
-# Set up a new isolated environment
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
-# Install requirements
 pip install -r requirements.txt
-```
-
-### 2. Start the Server
-Run the FastAPI Web Server using basic python execution:
-```bash
 python app.py
 ```
 
+### Linux / Linux VM (Headless)
+
+Run the automated setup script (installs system libs, venv, and CPU-only PyTorch):
+
+```bash
+chmod +x setup_linux.sh && ./setup_linux.sh
+source .venv/bin/activate
+python app.py
+```
+
+Or manually:
+
+```bash
+# System dependencies (Ubuntu/Debian)
+sudo apt-get install -y libgl1 libglib2.0-0 ffmpeg
+
+# Create venv and install CPU-only torch (avoids ~2GB CUDA download)
+python3 -m venv .venv && source .venv/bin/activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+
+python app.py
+```
+
+> Note: `opencv-python-headless` is used in `requirements.txt` — this works on VMs without a display server. Physical webcams (index `0`, `1`, etc.) may not be available on VMs; use RTSP, DroidCam, or IP Webcam sources instead.
+
 ### 3. Access the Dashboard
-Navigate to `http://localhost:8000` in any web browser.
+Navigate to `http://localhost:8000` (or `http://<vm-ip>:8000` from another machine).
 
 ## 📁 Repository Structure
 - `app.py`: Main FastAPI concurrency router and AI Thread manager.

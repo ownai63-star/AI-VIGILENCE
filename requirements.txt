@@ -4,7 +4,7 @@ facenet-pytorch
 torchvision
 fastapi
 uvicorn
-opencv-python
+opencv-python-headless
 numpy
 jinja2
 python-multipart

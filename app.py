@@ -13,7 +13,6 @@ from utils.recognizer import FaceRecognizer
 from cameras.camera_manager import CameraManager
 import threading
 import time
-import urllib.parse
 import torch
 from typing import Dict, Any, Optional
 
@@ -22,18 +21,36 @@ from typing import Dict, Any, Optional
 # ---------------------------------------------------------------------------
 
 def sanitize_rtsp_url(url: str) -> str:
-    if not isinstance(url, str) or not url.startswith("rtsp://"):
+    """Percent-encode special characters in the password portion of an RTSP URL.
+    Handles passwords containing multiple '@' signs by using rfind to locate the
+    last '@' as the user:pass / host boundary.
+    """
+    if not isinstance(url, str):
         return url
-    url_str = str(url)
-    last_at = url_str.rfind("@")
+    url = url.strip()
+    if not url.startswith("rtsp://"):
+        return url
+
+    # Everything after rtsp://
+    rest = url[7:]
+    last_at = rest.rfind("@")
     if last_at == -1:
-        return url_str
-    auth_part = url_str[7:last_at]
-    if ":" in auth_part:
-        user, pwd = auth_part.split(":", 1)
-        safe_pwd = urllib.parse.quote(pwd)
-        return f"rtsp://{user}:{safe_pwd}{url_str[last_at:]}"
-    return url_str
+        return url  # No auth in URL
+
+    auth_part = rest[:last_at]       # e.g. "test:dei@12@12"
+    host_part = rest[last_at + 1:]   # e.g. "10.7.16.48:554"
+
+    colon = auth_part.find(":")
+    if colon == -1:
+        return url  # No password, nothing to encode
+
+    user = auth_part[:colon]
+    pwd  = auth_part[colon + 1:]     # e.g. "dei@12@12"
+
+    # Encode only '@' in the password — FFmpeg requires this
+    safe_pwd = pwd.replace("@", "%40")
+
+    return f"rtsp://{user}:{safe_pwd}@{host_part}"
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -418,6 +435,9 @@ async def add_camera(camera_id: str = Form(...), camera_type: str = Form(...), s
     elif camera_type == "ipwebcam":
         if not source.startswith("http"):
             parsed = f"http://{source}:8080/video" if ":" not in source else f"http://{source}/video"
+    elif camera_type == "mjpeg":
+        # Direct MJPEG HTTP stream — pass as-is
+        parsed = source.strip()
 
     if camera_manager.add_camera(camera_id, parsed):
         db_manager.add_camera_to_db(camera_id, parsed)
@@ -465,11 +485,24 @@ async def toggle_recording(camera_id: str = Form(...)):
                 return {"status": "error", "message": "Camera offline or warming up"}
                 
             h, w = frame.shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'VP80')
             timestamp = int(time.time())
-            filename = f"rec_{camera_id}_{timestamp}.webm"
-            file_path = f"recordings/{filename}"
-            writer = cv2.VideoWriter(file_path, fourcc, 20.0, (w, h))
+            # Try VP80/WebM first (Windows), fall back to mp4v/MP4 (Linux headless)
+            fourcc_vp80 = cv2.VideoWriter_fourcc(*'VP80')
+            test_path = f"recordings/rec_{camera_id}_{timestamp}.webm"
+            test_writer = cv2.VideoWriter(test_path, fourcc_vp80, 20.0, (w, h))
+            if test_writer.isOpened():
+                fourcc = fourcc_vp80
+                filename = f"rec_{camera_id}_{timestamp}.webm"
+                file_path = test_path
+                writer = test_writer
+            else:
+                test_writer.release()
+                try: os.remove(test_path)
+                except Exception: pass
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                filename = f"rec_{camera_id}_{timestamp}.mp4"
+                file_path = f"recordings/{filename}"
+                writer = cv2.VideoWriter(file_path, fourcc, 20.0, (w, h))
             
             db_id = db_manager.start_recording(camera_id, file_path)
             camera_writers[camera_id] = {"writer": writer, "db_id": db_id}
