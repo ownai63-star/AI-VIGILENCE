@@ -1,15 +1,16 @@
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 class ObjectTracker:
-    def __init__(self, max_age=10, n_init=2):
-        # Balanced for 60-90 FPS tracking with YOLO every 3 frames
-        # n_init=2 filters out one-off false positives on whiteboards/walls
-        # max_age=10 kills lost tracks quickly to prevent duplication
+    def __init__(self, max_age=30, n_init=1):
+        # n_init=1: confirm a track after just 1 detection (important when YOLO runs every 3 frames)
+        # max_age=30: keep a lost track for 30 frames (~1 sec) before deleting it
+        # max_iou_distance=0.7: more lenient IoU matching for occluded/moving persons
+        # embedder=None: disable deep embeddings (rely on IoU matching only) - avoids PyTorch issues
         self.tracker = DeepSort(
             max_age=max_age, 
             n_init=n_init, 
-            max_iou_distance=0.5, 
-            embedder='mobilenet',
+            max_iou_distance=0.7, 
+            embedder=None,
             bgr=True
         )
 
@@ -27,8 +28,8 @@ class ObjectTracker:
                 continue
             
             # 2. Filter out 'ghost' tracks that haven't been seen by YOLO recently
-            # With DETECTION_INTERVAL=3, a live track should have time_since_update <= 3
-            if track.time_since_update > 5:
+            # With DETECTION_INTERVAL=3, a live track should have time_since_update <= 9
+            if track.time_since_update > 9:
                 continue
 
             track_id = track.track_id

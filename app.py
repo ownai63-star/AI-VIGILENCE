@@ -179,6 +179,8 @@ def process_camera(camera_id: str):
             
             # DeepSort internal Kalman filter handles position prediction during 'empty' frames
             tracks = tracker.update(detections, frame)
+            if frame_count % 30 == 0:
+                print(f"[process_camera:{camera_id}] Frame {frame_count}: {len(tracks)} confirmed tracks")
 
             # 2. Update tracking state for cumulative counting and rendering
             processed = []
