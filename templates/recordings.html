@@ -4,283 +4,512 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Vigilance - Recordings</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
     <style>
-        * { box-sizing: border-box; }
-        .search-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 20px;}
-        .search-controls input[type=text] { flex: 1; min-width: 200px; padding: 10px; border-radius: 5px; border: 1px solid #333; background: #222; color: white;}
-        .filter-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 20px;}
-        .filter-controls input { padding: 10px; border-radius: 5px; border: 1px solid #333; background: #222; color: white;}
-        .btn-primary { background: #00bcd4; color: black; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: all 0.2s; }
-        .btn-primary:hover { background: #00acc1; }
-        .btn-secondary { background: #444; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: all 0.2s; }
-        .btn-secondary:hover { background: #555; }
-        .btn-danger { background: #ff3333; color: white; padding: 8px 16px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: all 0.2s; }
-        .btn-danger:hover { background: #ff4444; }
-        .btn-small { padding: 6px 12px; font-size: 0.8rem; border-radius: 4px; border: none; cursor: pointer; }
-        
-        .recording-card { background: #1a1a2e; border: 1px solid #333; border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; transition: transform 0.2s, border-color 0.2s; }
-        .recording-card:hover { transform: translateY(-3px); border-color: #00bcd4; }
-        .recording-thumbnail { 
-            width: 100%; 
-            height: 180px; 
-            background: #0a0a1a;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            position: relative;
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            background: #f0f0f0; 
+            color: #333;
+            height: 100vh;
             overflow: hidden;
         }
-        .recording-thumbnail video { 
-            width: 100%; 
-            height: 100%; 
-            object-fit: cover;
-        }
-        .play-overlay {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 60px;
+        /* Header */
+        .header {
+            background: #c41e3a;
+            padding: 0;
             height: 60px;
-            background: rgba(0, 188, 212, 0.9);
-            border-radius: 50%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .header-left {
             display: flex;
             align-items: center;
-            justify-content: center;
-            font-size: 24px;
-            color: black;
-            opacity: 0.9;
+            height: 100%;
+        }
+        .logo { 
+            font-size: 20px; 
+            font-weight: bold; 
+            color: #fff;
+            padding: 0 25px;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            background: #a01830;
+        }
+        .nav {
+            display: flex;
+            height: 100%;
+        }
+        .nav a {
+            color: rgba(255,255,255,0.9);
+            text-decoration: none;
+            padding: 0 25px;
+            height: 60px;
+            line-height: 60px;
+            font-size: 14px;
+            transition: all 0.2s;
+            border-bottom: 3px solid transparent;
+        }
+        .nav a:hover {
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+        }
+        .nav a.active {
+            background: rgba(255,255,255,0.15);
+            border-bottom-color: #fff;
+            color: #fff;
+        }
+        .header-right {
+            display: flex;
+            align-items: center;
+            padding-right: 20px;
+            gap: 15px;
+        }
+        .user-info {
+            color: rgba(255,255,255,0.9);
+            font-size: 13px;
+        }
+        .logout-btn {
+            background: rgba(255,255,255,0.2);
+            border: 1px solid rgba(255,255,255,0.3);
+            color: #fff;
+            padding: 6px 16px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .logout-btn:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        /* Main Layout */
+        .main-container {
+            display: flex;
+            height: calc(100vh - 60px);
+        }
+        /* Sidebar */
+        .sidebar {
+            width: 220px;
+            background: #2d2d2d;
+            border-right: 1px solid #444;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar-header {
+            background: #c41e3a;
+            padding: 15px;
+            color: #fff;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .sidebar-footer {
+            margin-top: auto;
+            padding: 15px;
+            border-top: 1px solid #444;
+            background: #262626;
+        }
+        .sidebar-footer .user-info {
+            color: #ccc;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
+        .sidebar-footer .logout-btn {
+            width: 100%;
+            background: #c41e3a;
+            border: none;
+            color: #fff;
+            padding: 8px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .sidebar-footer .logout-btn:hover {
+            background: #a01830;
+        }
+        .sidebar-section {
+            border-bottom: 1px solid #444;
+        }
+        .sidebar-title {
+            padding: 12px 15px;
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: #262626;
+        }
+        .sidebar-menu {
+            list-style: none;
+        }
+        .sidebar-menu li a {
+            display: block;
+            padding: 12px 15px 12px 20px;
+            color: #ccc;
+            text-decoration: none;
+            font-size: 13px;
+            border-left: 3px solid transparent;
             transition: all 0.2s;
         }
-        .recording-thumbnail:hover .play-overlay {
-            transform: translate(-50%, -50%) scale(1.1);
-            opacity: 1;
+        .sidebar-menu li a:hover {
+            background: #3a3a3a;
+            color: #fff;
         }
-        .recording-info { padding: 15px; }
-        .recording-info h4 { margin: 0 0 10px 0; color: #00bcd4; font-size: 1.1rem; }
-        .recording-info p { margin: 5px 0; color: #aaa; font-size: 0.9rem; }
-        .recording-actions { display: flex; gap: 8px; margin-top: 10px; }
-        .results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
-        
+        .sidebar-menu li a.active {
+            background: #3a3a3a;
+            border-left-color: #c41e3a;
+            color: #fff;
+        }
+        .sidebar-menu li a::before {
+            content: "▸";
+            margin-right: 8px;
+            color: #666;
+            font-size: 10px;
+        }
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .toolbar {
+            background: #fff;
+            padding: 12px 20px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .toolbar-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+        }
+        /* Content */
+        .content {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f5f5f5;
+        }
+        /* Filter Bar */
+        .filter-bar {
+            background: #fff;
+            padding: 15px 20px;
+            border: 1px solid #ddd;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .filter-group label {
+            font-size: 13px;
+            color: #555;
+        }
+        .filter-group input,
+        .filter-group select {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            font-size: 13px;
+        }
+        .btn {
+            padding: 8px 20px;
+            border: 1px solid #ccc;
+            background: #fff;
+            color: #333;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .btn:hover {
+            background: #f5f5f5;
+        }
+        .btn-primary {
+            background: #c41e3a;
+            border-color: #c41e3a;
+            color: #fff;
+        }
+        .btn-primary:hover {
+            background: #a01830;
+        }
+        .btn-danger {
+            background: #e74c3c;
+            border-color: #e74c3c;
+            color: #fff;
+        }
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        /* Table */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #fff;
+            border: 1px solid #ddd;
+        }
+        .data-table th,
+        .data-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .data-table th {
+            background: #f8f8f8;
+            font-weight: 600;
+            font-size: 13px;
+            color: #555;
+        }
+        .data-table td {
+            font-size: 13px;
+        }
+        .data-table tr:hover {
+            background: #f5f5f5;
+        }
         /* Video Modal */
-        .video-modal {
+        .modal {
             display: none;
             position: fixed;
             top: 0;
             left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.95);
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0,0,0,0.9);
             z-index: 1000;
             justify-content: center;
             align-items: center;
         }
-        .video-modal.active { display: flex; }
-        .video-modal-content {
-            background: #1a1a2e;
-            border-radius: 10px;
-            padding: 20px;
-            max-width: 90%;
-            max-height: 90%;
-            position: relative;
-            width: 900px;
+        .modal.active {
+            display: flex;
         }
-        .video-modal video {
-            width: 100%;
-            max-height: 70vh;
-            border-radius: 8px;
+        .modal-content {
+            background: #1a1a1a;
+            width: 80%;
+            max-width: 900px;
+        }
+        .modal-header {
+            background: #c41e3a;
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-title {
+            color: #fff;
+            font-size: 15px;
         }
         .modal-close {
-            position: absolute;
-            top: -40px;
-            right: 0;
-            background: #ff3333;
-            color: white;
+            background: none;
             border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
+            color: #fff;
+            font-size: 20px;
             cursor: pointer;
-            font-weight: bold;
         }
-        .modal-info {
-            margin-top: 15px;
-            padding: 15px;
-            background: #252540;
-            border-radius: 8px;
+        .modal-body {
+            padding: 0;
         }
-        .modal-info h4 { margin: 0 0 10px 0; color: #00bcd4; }
-        .modal-info p { margin: 5px 0; color: #aaa; }
+        .modal-body video {
+            width: 100%;
+            display: block;
+        }
     </style>
 </head>
 <body>
-    <header>
-        <div class="logo">AI VIGILANCE</div>
-        <nav>
-            <a href="/">Feeds</a>
-            <a href="/people">People</a>
-            <a href="/cameras">Cameras</a>
-            <a href="/search">Search</a>
-            <a href="/recordings_page" class="active">Recordings</a>
-        </nav>
-    </header>
+    <div class="main-container">
+        <div class="sidebar">
+            <div class="sidebar-header">AI Vigilance</div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Camera Management</div>
+                <ul class="sidebar-menu">
+                    <li><a href="/">Live View</a></li>
+                    <li><a href="/cameras">Camera List</a></li>
+                    <li><a href="/recordings_page" class="active">Recordings</a></li>
+                </ul>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Analytics</div>
+                <ul class="sidebar-menu">
+                    <li><a href="/people">Registered Persons</a></li>
+                    <li><a href="/search">Search Events</a></li>
+                </ul>
+            </div>
+            <div class="sidebar-footer">
+                <div class="user-info">Logged in as: Admin</div>
+                <button class="logout-btn" onclick="location.href='/logout'">Logout</button>
+            </div>
+        </div>
 
-    <main class="search-page">
-        <section class="filters">
-            <div class="section-title">
-                <h2>Video Recordings</h2>
+        <div class="main-content">
+            <div class="toolbar">
+                <h1 class="toolbar-title">Video Recordings</h1>
             </div>
-            <div class="search-controls">
-                <input type="text" id="camera-search" placeholder="Filter by Camera ID (e.g. Webcam)">
-                <button id="search-recordings-btn" class="btn-primary">🔍 Load Recordings</button>
-            </div>
-            <div class="filter-controls">
-                <label style="color:#aaa; font-size:0.85rem;">From</label>
-                <input type="datetime-local" id="rec-start-time">
-                <label style="color:#aaa; font-size:0.85rem;">To</label>
-                <input type="datetime-local" id="rec-end-time">
-            </div>
-        </section>
+            
+            <div class="content">
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <label>Camera:</label>
+                        <select id="filter-camera">
+                            <option value="">All Cameras</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>From:</label>
+                        <input type="datetime-local" id="filter-start">
+                    </div>
+                    <div class="filter-group">
+                        <label>To:</label>
+                        <input type="datetime-local" id="filter-end">
+                    </div>
+                    <button class="btn btn-primary" onclick="loadRecordings()">Search</button>
+                </div>
 
-        <section class="results">
-            <div class="results-grid" id="recordings-grid">
-                <p style="color:#666;">Click "Load Recordings" to view saved video feeds.</p>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Start Time</th>
+                            <th>Camera</th>
+                            <th>Duration</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recordings-list">
+                        <tr>
+                            <td colspan="4" style="text-align: center; color: #888;">Loading...</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
-        </section>
-    </main>
+        </div>
+    </div>
 
-    <!-- Video Preview Modal -->
-    <div id="video-modal" class="video-modal">
-        <div class="video-modal-content">
-            <button class="modal-close" onclick="closeVideoModal()">✕ Close</button>
-            <video id="modal-video" controls>
-                <source src="" type="video/webm">
-                Your browser does not support the video tag.
-            </video>
-            <div class="modal-info" id="modal-info">
-                <h4>Video Information</h4>
-                <p id="modal-camera">Camera: </p>
-                <p id="modal-time">Recorded: </p>
+    <!-- Video Player Modal -->
+    <div class="modal" id="videoModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title">Video Playback</span>
+                <button class="modal-close" onclick="closeVideo()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <video id="videoPlayer" controls>
+                    <source src="" type="video/mp4">
+                </video>
             </div>
         </div>
     </div>
 
     <script>
-        let currentRecordings = [];
+        // Load cameras for filter
+        async function loadCameras() {
+            try {
+                const res = await fetch('/api/cameras');
+                const cameras = await res.json();
+                const select = document.getElementById('filter-camera');
+                cameras.forEach(cam => {
+                    const opt = document.createElement('option');
+                    opt.value = cam.id;
+                    opt.textContent = cam.id;
+                    select.appendChild(opt);
+                });
+            } catch (err) {
+                console.error('Failed to load cameras:', err);
+            }
+        }
 
-        document.addEventListener('DOMContentLoaded', () => {
-            const searchBtn = document.getElementById('search-recordings-btn');
-            const grid = document.getElementById('recordings-grid');
-
-            const fetchRecordings = async () => {
-                searchBtn.innerText = 'Loading...';
-                searchBtn.disabled = true;
-
-                const cam = document.getElementById('camera-search').value.trim();
-                const start = document.getElementById('rec-start-time').value;
-                const end = document.getElementById('rec-end-time').value;
-
+        // Load recordings
+        async function loadRecordings() {
+            const tbody = document.getElementById('recordings-list');
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #888;">Loading...</td></tr>';
+            
+            try {
                 const params = new URLSearchParams();
-                if (cam) params.append('camera_id', cam);
+                const camera = document.getElementById('filter-camera').value;
+                const start = document.getElementById('filter-start').value;
+                const end = document.getElementById('filter-end').value;
+                
+                if (camera) params.append('camera_id', camera);
                 if (start) params.append('start_time', start);
                 if (end) params.append('end_time', end);
-
-                try {
-                    const res = await fetch(`/api/recordings?${params}`);
-                    const data = await res.json();
-                    currentRecordings = data;
-                    
-                    if (!data || data.length === 0) {
-                        grid.innerHTML = '<p style="color:#666;padding:1rem;">No recordings found.</p>';
-                    } else {
-                        grid.innerHTML = data.map(r => `
-                            <div class="recording-card">
-                                <div class="recording-thumbnail" onclick="openVideoModal(${r.id})">
-                                    <video preload="metadata" muted>
-                                        <source src="/${r.file_path}#t=0.1" type="video/webm">
-                                    </video>
-                                    <div class="play-overlay">▶</div>
-                                </div>
-                                <div class="recording-info">
-                                    <h4>🎥 ${r.camera_id}</h4>
-                                    <p><b>Start:</b> ${new Date(r.start_time).toLocaleString()}</p>
-                                    <p><b>End:</b> ${r.end_time ? new Date(r.end_time).toLocaleString() : 'Ongoing...'}</p>
-                                    <div class="recording-actions">
-                                        <button class="btn-small btn-primary" onclick="openVideoModal(${r.id})">▶ Play</button>
-                                        <button class="btn-small btn-danger" onclick="deleteRecording(${r.id})">🗑 Delete</button>
-                                    </div>
-                                </div>
-                            </div>
-                        `).join('');
-                    }
-                } catch (e) {
-                    grid.innerHTML = '<p style="color:#ff3333;padding:1rem;">Error loading recordings.</p>';
+                
+                const res = await fetch(`/api/recordings?${params}`);
+                const recordings = await res.json();
+                
+                if (recordings.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #888;">No recordings found</td></tr>';
+                    return;
                 }
+                
+                tbody.innerHTML = recordings.map(r => {
+                    const startTime = new Date(r.start_time).toLocaleString();
+                    const duration = r.end_time ? 
+                        Math.round((new Date(r.end_time) - new Date(r.start_time)) / 60000) + ' min' : 
+                        'Recording...';
+                    
+                    return `
+                        <tr>
+                            <td>${startTime}</td>
+                            <td>${r.camera_id}</td>
+                            <td>${duration}</td>
+                            <td>
+                                <button class="btn btn-primary" onclick="playVideo('${r.file_path}')" style="padding: 5px 12px; font-size: 12px;">Play</button>
+                                <button class="btn btn-danger" onclick="deleteRecording(${r.id})" style="padding: 5px 12px; font-size: 12px;">Delete</button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (err) {
+                console.error('Failed to load recordings:', err);
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #888;">Error loading recordings</td></tr>';
+            }
+        }
 
-                searchBtn.innerText = '🔍 Load Recordings';
-                searchBtn.disabled = false;
-            };
-
-            searchBtn.addEventListener('click', fetchRecordings);
-            fetchRecordings();
-        });
-
-        window.openVideoModal = (id) => {
-            const recording = currentRecordings.find(r => r.id === id);
-            if (!recording) return;
-            
-            const modal = document.getElementById('video-modal');
-            const video = document.getElementById('modal-video');
-            const cameraEl = document.getElementById('modal-camera');
-            const timeEl = document.getElementById('modal-time');
-            
-            video.src = '/' + recording.file_path;
-            cameraEl.textContent = 'Camera: ' + recording.camera_id;
-            timeEl.textContent = 'Recorded: ' + new Date(recording.start_time).toLocaleString();
-            
+        // Play video
+        function playVideo(path) {
+            const modal = document.getElementById('videoModal');
+            const player = document.getElementById('videoPlayer');
+            player.src = path;
             modal.classList.add('active');
-            video.play();
-        };
+            player.play();
+        }
 
-        window.closeVideoModal = () => {
-            const modal = document.getElementById('video-modal');
-            const video = document.getElementById('modal-video');
-            video.pause();
-            video.src = '';
+        // Close video
+        function closeVideo() {
+            const modal = document.getElementById('videoModal');
+            const player = document.getElementById('videoPlayer');
+            player.pause();
+            player.src = '';
             modal.classList.remove('active');
-        };
+        }
 
-        // Close modal on background click
-        document.getElementById('video-modal')?.addEventListener('click', (e) => {
-            if (e.target.id === 'video-modal') {
-                closeVideoModal();
-            }
-        });
-
-        // Close modal on Escape key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                closeVideoModal();
-            }
-        });
-
-        window.deleteRecording = async (id) => {
-            if (!confirm('Are you sure you want to delete this video recording? This cannot be undone.')) return;
+        // Delete recording
+        async function deleteRecording(id) {
+            if (!confirm('Delete this recording?')) return;
+            
             try {
                 const res = await fetch(`/api/recordings/${id}`, { method: 'DELETE' });
-                const data = await res.json();
-                if (data.status === 'success') {
-                    document.getElementById('search-recordings-btn').click(); // refresh
+                if (res.ok) {
+                    loadRecordings();
                 } else {
-                    alert(data.message || 'Error deleting recording');
+                    alert('Failed to delete recording');
                 }
-            } catch (e) {
-                alert('Failed to delete recording');
+            } catch (err) {
+                console.error('Error:', err);
             }
-        };
+        }
+
+        // Close modal on click outside
+        document.getElementById('videoModal').addEventListener('click', (e) => {
+            if (e.target === document.getElementById('videoModal')) {
+                closeVideo();
+            }
+        });
+
+        // Initialize
+        loadCameras();
+        loadRecordings();
     </script>
-    <script type="module" src="/static/script.js"></script>
 </body>
 </html>

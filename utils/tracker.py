@@ -1,15 +1,19 @@
 import numpy as np
 
 class ObjectTracker:
-    """IoU-based tracker for person tracking - immediate cleanup when person leaves."""
-    def __init__(self, max_age=2, n_init=1, iou_threshold=0.3):
-        # max_age=2: Remove track after just 2 frames without detection
+    """IoU-based tracker optimized for all person tracking scenarios."""
+    def __init__(self, max_age=3, n_init=1, iou_threshold=0.25):
+        # max_age=3: Quick recovery from occlusion, but not too long to ghost
         self.max_age = max_age
-        self.n_init = n_init
-        self.iou_threshold = iou_threshold
+        self.n_init = n_init  # Only 1 hit needed to start tracking
+        self.iou_threshold = iou_threshold  # Lower threshold for better matching
         self.tracks = []
         self.next_id = 1
         self.frame_count = 0
+        # Face recognition cache: track_id -> face_encoding
+        self.face_encodings = {}
+        # Track merge history to prevent double counting same person
+        self.merged_tracks = {}
 
     def _compute_iou(self, box1, box2):
         """Compute IoU between two boxes [x1, y1, x2, y2]."""
@@ -25,10 +29,22 @@ class ObjectTracker:
         
         return inter_area / union_area if union_area > 0 else 0
 
+    def _compute_center_distance(self, box1, box2):
+        """Compute distance between box centers."""
+        c1_x = (box1[0] + box1[2]) / 2
+        c1_y = (box1[1] + box1[3]) / 2
+        c2_x = (box2[0] + box2[2]) / 2
+        c2_y = (box2[1] + box2[3]) / 2
+        return np.sqrt((c1_x - c2_x)**2 + (c1_y - c2_y)**2)
+
+    def _compute_box_size(self, box):
+        """Compute box area."""
+        return (box[2] - box[0]) * (box[3] - box[1])
+
     def update(self, detections, frame=None):
         """
         Update tracker with new detections.
-        Immediately removes tracks with no matching detection.
+        Optimized for fast movement, occlusion, and various poses.
         """
         self.frame_count += 1
         
@@ -44,10 +60,15 @@ class ObjectTracker:
                 'matched': False
             })
         
-        # Match detections to existing tracks
+        # Hungarian algorithm style matching - find best matches
         matched_track_indices = set()
+        matched_det_indices = set()
         
+        # First pass: match by IoU (primary matching)
         for det_idx, det in enumerate(det_boxes):
+            if det_idx in matched_det_indices:
+                continue
+                
             best_iou = self.iou_threshold
             best_track_idx = -1
             
@@ -68,6 +89,39 @@ class ObjectTracker:
                 track['hits'] += 1
                 track['last_seen'] = self.frame_count
                 matched_track_indices.add(best_track_idx)
+                matched_det_indices.add(det_idx)
+                det['matched'] = True
+        
+        # Second pass: match by center distance for fast moving objects
+        for det_idx, det in enumerate(det_boxes):
+            if det_idx in matched_det_indices:
+                continue
+                
+            best_dist = 2000  # pixels - larger for fast movement
+            best_track_idx = -1
+            
+            for track_idx, track in enumerate(self.tracks):
+                if track_idx in matched_track_indices:
+                    continue
+                # Only match if track has been seen recently
+                if self.frame_count - track['last_seen'] > 1:
+                    continue
+                dist = self._compute_center_distance(det['bbox'], track['bbox'])
+                # Allow larger movement for distant/small objects
+                max_dist = 300 if track.get('small', False) else 200
+                if dist < best_dist and dist < max_dist:
+                    best_dist = dist
+                    best_track_idx = track_idx
+            
+            if best_track_idx >= 0:
+                track = self.tracks[best_track_idx]
+                track['bbox'] = det['bbox']
+                track['conf'] = det['conf']
+                track['age'] = 0
+                track['hits'] += 1
+                track['last_seen'] = self.frame_count
+                matched_track_indices.add(best_track_idx)
+                matched_det_indices.add(det_idx)
                 det['matched'] = True
         
         # Age unmatched tracks
@@ -86,16 +140,16 @@ class ObjectTracker:
                     'age': 0,
                     'hits': 1,
                     'last_seen': self.frame_count,
-                    'created_at': self.frame_count
+                    'created_at': self.frame_count,
+                    'small': self._compute_box_size(det['bbox']) < 5000  # Mark small objects
                 }
                 self.tracks.append(new_track)
                 self.next_id += 1
         
-        # IMMEDIATE CLEANUP: Remove any track that wasn't matched this frame
-        # This ensures when a person leaves, their box disappears immediately
+        # Remove old tracks
         self.tracks = [t for t in self.tracks if t['age'] < self.max_age]
         
-        # Return only currently matched tracks (age = 0)
+        # Return currently matched tracks (age == 0)
         active_tracks = []
         for track in self.tracks:
             if track['hits'] >= self.n_init and track['age'] == 0:

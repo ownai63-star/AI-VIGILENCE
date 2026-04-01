@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Vigilance - Detection Logs</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            background: #f0f0f0; 
+            color: #333;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .main-container {
+            display: flex;
+            height: 100vh;
+        }
+        .sidebar {
+            width: 220px;
+            background: #2d2d2d;
+            border-right: 1px solid #444;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        .sidebar-header {
+            background: #c41e3a;
+            padding: 15px;
+            color: #fff;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .sidebar-section {
+            border-bottom: 1px solid #444;
+        }
+        .sidebar-title {
+            padding: 12px 15px;
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: #262626;
+        }
+        .sidebar-menu {
+            list-style: none;
+        }
+        .sidebar-menu li a {
+            display: block;
+            padding: 12px 15px 12px 20px;
+            color: #ccc;
+            text-decoration: none;
+            font-size: 13px;
+            border-left: 3px solid transparent;
+            transition: all 0.2s;
+        }
+        .sidebar-menu li a:hover {
+            background: #3a3a3a;
+            color: #fff;
+        }
+        .sidebar-menu li a.active {
+            background: #3a3a3a;
+            border-left-color: #c41e3a;
+            color: #fff;
+        }
+        .sidebar-menu li a::before {
+            content: "▸";
+            margin-right: 8px;
+            color: #666;
+            font-size: 10px;
+        }
+        .sidebar-footer {
+            margin-top: auto;
+            padding: 15px;
+            border-top: 1px solid #444;
+            background: #262626;
+        }
+        .sidebar-footer .user-info {
+            color: #ccc;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
+        .sidebar-footer .logout-btn {
+            width: 100%;
+            background: #c41e3a;
+            border: none;
+            color: #fff;
+            padding: 8px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .toolbar {
+            background: #fff;
+            padding: 12px 20px;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .toolbar-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+        }
+        .content {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f5f5f5;
+        }
+        .filter-bar {
+            background: #fff;
+            padding: 15px 20px;
+            border: 1px solid #ddd;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: flex-end;
+        }
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .filter-group label {
+            font-size: 12px;
+            color: #666;
+            font-weight: 500;
+        }
+        .filter-group select,
+        .filter-group input {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            font-size: 13px;
+            min-width: 150px;
+        }
+        .btn {
+            padding: 8px 20px;
+            border: 1px solid #ccc;
+            background: #fff;
+            color: #333;
+            font-size: 13px;
+            cursor: pointer;
+            border-radius: 3px;
+            transition: all 0.2s;
+        }
+        .btn:hover {
+            background: #f5f5f5;
+        }
+        .btn-primary {
+            background: #c41e3a;
+            border-color: #c41e3a;
+            color: #fff;
+        }
+        .btn-primary:hover {
+            background: #a01830;
+        }
+        .logs-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 15px;
+        }
+        .log-card {
+            background: #fff;
+            border: 1px solid #ddd;
+            overflow: hidden;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .log-card:hover {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            transform: translateY(-2px);
+        }
+        .log-image {
+            width: 100%;
+            height: 160px;
+            object-fit: cover;
+            background: #000;
+        }
+        .log-info {
+            padding: 12px 15px;
+        }
+        .log-time {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        .log-camera {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 8px;
+        }
+        .log-count {
+            display: inline-block;
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 4px 10px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #888;
+            background: #fff;
+            border: 1px solid #ddd;
+        }
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0,0,0,0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            max-width: 90vw;
+            max-height: 90vh;
+            position: relative;
+        }
+        .modal-image {
+            max-width: 100%;
+            max-height: 85vh;
+            object-fit: contain;
+        }
+        .modal-close {
+            position: absolute;
+            top: -40px;
+            right: 0;
+            background: none;
+            border: none;
+            color: #fff;
+            font-size: 30px;
+            cursor: pointer;
+        }
+        .modal-info {
+            position: absolute;
+            bottom: -40px;
+            left: 0;
+            color: #fff;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <div class="sidebar">
+            <div class="sidebar-header">AI Vigilance</div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Camera Management</div>
+                <ul class="sidebar-menu">
+                    <li><a href="/">Live View</a></li>
+                    <li><a href="/cameras">Camera List</a></li>
+                    <li><a href="/recordings_page">Recordings</a></li>
+                </ul>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Analytics</div>
+                <ul class="sidebar-menu">
+                    <li><a href="/people">Registered Persons</a></li>
+                    <li><a href="/search">Search Events</a></li>
+                </ul>
+            </div>
+            <div class="sidebar-footer">
+                <div class="user-info">Logged in as: Admin</div>
+                <button class="logout-btn" onclick="location.href='/logout'">Logout</button>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="toolbar">
+                <h1 class="toolbar-title">Detection Logs</h1>
+            </div>
+            
+            <div class="content">
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <label>Camera:</label>
+                        <select id="camera-filter">
+                            <option value="">All Cameras</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" onclick="loadLogs()">Refresh</button>
+                </div>
+
+                <div class="logs-grid" id="logsGrid">
+                    <div class="empty-state">Loading detection logs...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image Modal -->
+    <div class="modal" id="imageModal" onclick="closeModal()">
+        <div class="modal-content">
+            <button class="modal-close">&times;</button>
+            <img class="modal-image" id="modalImage" src="" alt="Detection Snapshot">
+            <div class="modal-info" id="modalInfo"></div>
+        </div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const preselectedCamera = urlParams.get('camera_id');
+
+        // Load cameras for filter
+        async function loadCameras() {
+            try {
+                const res = await fetch('/api/cameras');
+                const cameras = await res.json();
+                const select = document.getElementById('camera-filter');
+                select.innerHTML = '<option value="">All Cameras</option>' +
+                    cameras.map(cam => `<option value="${cam.id}" ${cam.id === preselectedCamera ? 'selected' : ''}>${cam.id}</option>`).join('');
+            } catch (err) {
+                console.error('Failed to load cameras:', err);
+            }
+        }
+
+        // Load detection logs
+        async function loadLogs() {
+            const cameraId = document.getElementById('camera-filter').value;
+            const grid = document.getElementById('logsGrid');
+            grid.innerHTML = '<div class="empty-state">Loading...</div>';
+            
+            try {
+                const url = cameraId ? `/api/detection_snapshots?camera_id=${cameraId}&limit=50` : '/api/detection_snapshots?limit=50';
+                const res = await fetch(url);
+                const logs = await res.json();
+                
+                if (logs.length === 0) {
+                    grid.innerHTML = '<div class="empty-state">No detection logs found</div>';
+                    return;
+                }
+                
+                grid.innerHTML = logs.map(log => {
+                    const date = new Date(log.timestamp);
+                    const timeStr = date.toLocaleString();
+                    return `
+                        <div class="log-card" onclick="openModal('${log.snapshot_path}', '${timeStr}', '${log.camera_id}', ${log.person_count})">
+                            <img class="log-image" src="/${log.snapshot_path}" alt="Snapshot" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22280%22 height=%22160%22><rect fill=%22%23333%22 width=%22280%22 height=%22160%22/><text fill=%22%23666%22 x=%2250%%22 y=%2250%%22 text-anchor=%22middle%22>Image Not Available</text></svg>'">
+                            <div class="log-info">
+                                <div class="log-time">${timeStr}</div>
+                                <div class="log-camera">${log.camera_id}</div>
+                                <span class="log-count">${log.person_count} Persons</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (err) {
+                console.error('Failed to load logs:', err);
+                grid.innerHTML = '<div class="empty-state">Failed to load logs</div>';
+            }
+        }
+
+        // Open image modal
+        function openModal(imagePath, timeStr, cameraId, count) {
+            document.getElementById('modalImage').src = '/' + imagePath;
+            document.getElementById('modalInfo').textContent = `${timeStr} | ${cameraId} | ${count} Persons`;
+            document.getElementById('imageModal').classList.add('active');
+        }
+
+        // Close modal
+        function closeModal() {
+            document.getElementById('imageModal').classList.remove('active');
+        }
+
+        // Close on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+
+        // Initialize
+        loadCameras();
+        loadLogs();
+    </script>
+</body>
+</html>

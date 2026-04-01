@@ -41,10 +41,10 @@ class PersonDetector:
         return detections
 
     def _detect_yolo(self, frame):
-        """YOLOv8 detection optimized for crowd detection."""
-        # Use lower confidence threshold for crowd scenes to catch more persons
-        # Increase image size for better detection of small/distant persons
-        results = self.model.predict(frame, classes=self.classes, conf=0.35, imgsz=640, verbose=False)
+        """YOLOv8 detection optimized for all person detection scenarios."""
+        # Lower confidence to catch distant/small persons
+        # Higher imgsz for better detection of small/distant objects
+        results = self.model.predict(frame, classes=self.classes, conf=0.35, imgsz=800, verbose=False)
         detections = []
         h, w = frame.shape[:2]
         
@@ -55,12 +55,14 @@ class PersonDetector:
                 conf = float(box.conf[0])
                 
                 bw, bh = x2-x1, y2-y1
-                # Relaxed size filters for crowd detection
-                # Allow smaller detections for distant persons
-                if bh < 20 or bw < 8:
+                
+                # Allow very small detections for distant persons
+                if bh < 25 or bw < 10:
                     continue
-                # Relaxed aspect ratio for various poses
-                if bh / bw < 0.8 or bh / bw > 8.0:
+                    
+                # Relaxed aspect ratio for various poses (standing, sitting, on bike)
+                aspect_ratio = bh / bw
+                if aspect_ratio < 0.8 or aspect_ratio > 5.0:
                     continue
                     
                 detections.append(([x1, y1, bw, bh], conf, 'person'))

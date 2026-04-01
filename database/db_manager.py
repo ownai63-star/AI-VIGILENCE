@@ -57,6 +57,26 @@ class DatabaseManager:
                     source TEXT NOT NULL
                 )
             ''')
+            # Table for camera recording settings
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS camera_settings (
+                    camera_id TEXT PRIMARY KEY,
+                    recording_enabled INTEGER DEFAULT 0,
+                    FOREIGN KEY (camera_id) REFERENCES cameras (camera_id)
+                )
+            ''')
+            # Table for detection snapshots with bounding boxes
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS detection_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    camera_id TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    person_count INTEGER,
+                    snapshot_path TEXT,
+                    bbox_data TEXT,
+                    FOREIGN KEY (camera_id) REFERENCES cameras (camera_id)
+                )
+            ''')
             conn.commit()
 
     def add_camera_to_db(self, camera_id, source):
@@ -157,6 +177,57 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM video_recordings WHERE id = ?', (record_id,))
             conn.commit()
+
+    def get_camera_recording_setting(self, camera_id):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT recording_enabled FROM camera_settings WHERE camera_id = ?', (camera_id,))
+            result = cursor.fetchone()
+            return result[0] if result else 0
+
+    def set_camera_recording(self, camera_id, enabled):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO camera_settings (camera_id, recording_enabled) VALUES (?, ?)',
+                (camera_id, 1 if enabled else 0)
+            )
+            conn.commit()
+
+    def log_detection_snapshot(self, camera_id, person_count, snapshot_path, bbox_data):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO detection_snapshots (camera_id, person_count, snapshot_path, bbox_data) VALUES (?, ?, ?, ?)',
+                (camera_id, person_count, snapshot_path, bbox_data)
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_detection_snapshots(self, camera_id=None, start_time=None, end_time=None, limit=100):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = 'SELECT * FROM detection_snapshots WHERE 1=1'
+            params = []
+            if camera_id:
+                query += " AND camera_id = ?"
+                params.append(camera_id)
+            if start_time:
+                query += " AND timestamp >= ?"
+                params.append(start_time)
+            if end_time:
+                query += " AND timestamp <= ?"
+                params.append(end_time)
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+    def get_snapshot(self, snapshot_id):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM detection_snapshots WHERE id = ?', (snapshot_id,))
+            return cursor.fetchone()
 
 
     def get_registered_persons(self):

@@ -56,22 +56,23 @@ class CameraHandler:
         self.cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
         # Force low-latency and no buffering (crucial for smooth live streaming)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        # Set lower buffer for smoother streaming
+        # Request 30 FPS from camera
         self.cap.set(cv2.CAP_PROP_FPS, 30)
         self.frame = None
         self.frame_id = 0
         self.running = True
         self.lock = threading.Lock()
+        # Use higher priority thread for video capture
         self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
 
     def _update(self):
+        """Capture frames as fast as possible for smooth video."""
         fails = 0
         while self.running:
-            # Read frame with minimal latency
+            # Read frame - don't wait, keep reading for latest frame
             ret, frame = self.cap.read()
             if not ret:
-                time.sleep(0.001)
                 fails += 1
                 if fails > 100:
                     # Reconnect logic for RTSP
@@ -79,9 +80,11 @@ class CameraHandler:
                     time.sleep(1)
                     self.cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
                     self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    self.cap.set(cv2.CAP_PROP_FPS, 30)
                     fails = 0
                 continue
             
+            # Always store latest frame - no delay
             with self.lock:
                 self.frame = frame
                 self.frame_id += 1

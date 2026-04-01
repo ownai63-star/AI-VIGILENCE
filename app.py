@@ -2,10 +2,12 @@ import cv2
 import numpy as np
 import os
 import shutil
-from fastapi import FastAPI, Request, File, UploadFile, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, Request, File, UploadFile, Form, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import secrets
 from database.db_manager import DatabaseManager
 from utils.detector import PersonDetector
 from utils.tracker import ObjectTracker
@@ -14,6 +16,32 @@ from cameras.camera_manager import CameraManager
 import threading
 import time
 from typing import Dict, Any, Optional
+
+# Security setup
+security = HTTPBasic(auto_error=False)
+
+# Simple admin credentials (in production, use database)
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin123"
+
+# Session storage (in production, use proper session management)
+authenticated_sessions: set = set()
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify admin credentials."""
+    if credentials:
+        is_correct_username = secrets.compare_digest(credentials.username, ADMIN_USERNAME)
+        is_correct_password = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
+        if is_correct_username and is_correct_password:
+            return credentials.username
+    return None
+
+def require_auth(request: Request):
+    """Check if user is authenticated via session cookie."""
+    session_token = request.cookies.get("session")
+    if session_token and session_token in authenticated_sessions:
+        return True
+    return False
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -101,6 +129,10 @@ recognizer.load_known_faces(db_manager)
 camera_results: Dict[str, Any] = {}
 results_lock = threading.Lock()  # Single shared lock for camera_results
 
+# Per-camera: recognized persons info
+camera_recognized_persons: Dict[str, Dict[int, str]] = {}
+recognized_lock = threading.Lock()
+
 # Recording state
 camera_writers: Dict[str, Any] = {}
 writer_lock = threading.Lock()
@@ -117,89 +149,84 @@ active_search_lock = threading.Lock()
 
 def process_camera(camera_id: str):
     """Background thread per camera: detection + tracking + face recognition.
-    
-    Strategy:
-    - Heavy processing (detection, face detection, recognition) runs every N frames
-    - Tracker predicts positions between detection frames
-    - Rendering happens every frame at 60 FPS with interpolated positions
-    - Optimized for 50-100 person crowd detection
+    Process exactly 2 FPS for high accuracy with reduced system load.
     """
-    print(f"[process_camera] Thread started for: {camera_id}")
+    print(f"[Camera:{camera_id}] Processing thread started (2 FPS mode)")
     
     # Wait for camera to be ready
     warmup_frames = 0
-    while warmup_frames < 30:
+    while warmup_frames < 5:
         frame, _ = camera_manager.get_camera_frame_with_id(camera_id)
         if frame is not None:
             warmup_frames += 1
         time.sleep(0.1)
-    print(f"[process_camera:{camera_id}] Camera warmed up, starting processing")
+    print(f"[Camera:{camera_id}] Camera ready - Processing at 2 FPS")
     
-    tracker: ObjectTracker = ObjectTracker(max_age=2, n_init=1, iou_threshold=0.3)
+    # Improved tracker: immediate tracking (n_init=1), quick recovery, low IoU threshold
+    tracker: ObjectTracker = ObjectTracker(max_age=3, n_init=1, iou_threshold=0.25)
     last_frame_id: int = -1
     frame_count: int = 0
     
-    # Processing intervals
-    DETECTION_INTERVAL: int = 2  # Run YOLO every 2 frames for better tracking
-    RECOGNITION_INTERVAL: int = 60  # Recognition every 60 frames
+    # Process exactly 2 frames per second
+    FRAME_INTERVAL: float = 0.5  # 500ms = 2 FPS
+    
+    # Recognition runs on EVERY frame (2 FPS) for maximum accuracy
     
     # Recognition cache: track_id -> (name, confidence, frame_number)
-    RECOGNITION_CACHE_FRAMES: int = 180  # Cache valid for 180 frames (~3 seconds)
+    RECOGNITION_CACHE_FRAMES: int = 4  # Cache valid for 4 frames (~2 seconds at 2 FPS)
     recognition_cache: Dict[Any, tuple] = {}
     
-    # Cumulative unique persons seen on this camera
-    seen_track_ids: set = set()
+    # Track IDs currently in frame (to prevent double counting)
+    current_frame_track_ids: set = set()
     
-    # Last detection results
-    last_detections: list = []
-    last_detection_frame: int = 0
-
-    # Target processing rate for smooth output
-    target_process_fps = 30
-    process_interval = 1.0 / target_process_fps
-    last_process_time = 0
+    # Face encoding cache for deduplication: track_id -> encoding
+    face_encoding_cache: Dict[int, np.ndarray] = {}
+    # Track merge map: old_id -> new_id (for deduplication)
+    track_merge_map: Dict[int, int] = {}
+    last_process_time: float = 0
 
     while True:
-        loop_start = time.time()
+        # Wait for next 2 FPS interval
+        current_time = time.time()
+        elapsed = current_time - last_process_time
+        if elapsed < FRAME_INTERVAL:
+            time.sleep(FRAME_INTERVAL - elapsed)
         
         frame, frame_id = camera_manager.get_camera_frame_with_id(camera_id)
-        if frame is None or frame_id == last_frame_id:
-            time.sleep(0.001)
+        if frame is None:
             continue
+            
+        # Get latest frame (may skip some camera frames to maintain 2 FPS)
         last_frame_id = frame_id
         frame_count += 1
+        last_process_time = time.time()
 
         try:
             h, w = frame.shape[:2]
             
-            # Determine which heavy operations to run this frame
-            run_detection = (frame_count % DETECTION_INTERVAL == 0)
-            run_recognition = (frame_count % RECOGNITION_INTERVAL == 0)
-
-            # 1. AI Processing
-            detections = []
-            if run_detection:
-                detections = detector.detect(frame)
+            # Run detection on EVERY frame (2 FPS) for high accuracy
+            detections = detector.detect(frame)
             
-            # Update tracker with current detections
+            # Run recognition on EVERY frame (2 FPS) - no skip
+            
+            # Update tracker
             tracks = tracker.update(detections, frame)
-            if frame_count % 60 == 0:  # Log every 60 frames (2 seconds at 30fps)
-                print(f"[process_camera:{camera_id}] detected: {len(detections)}, tracking: {len(tracks)}")
-
-            # 2. Update tracking state for cumulative counting and rendering
-            processed = []
-            current_track_ids = set()
             
+            # Build current frame track IDs for anti-double-counting
+            new_track_ids = set(t["id"] for t in tracks)
+            
+            # Log count on every frame at 2 FPS
+            if len(new_track_ids) != len(current_frame_track_ids):
+                print(f"[Camera:{camera_id}] Persons: {len(tracks)}")
+            current_frame_track_ids = new_track_ids
+
+            # Build processed tracks with cached recognition
+            processed = []
             for t in tracks:
                 track_id = t["id"]
-                bbox = t["bbox"]  # Latest position
-                current_track_ids.add(track_id)
+                bbox = t["bbox"]
                 
-                # Add to cumulative count immediately (no stability delay for crowds)
-                if track_id not in seen_track_ids:
-                    seen_track_ids.add(track_id)
-                
-                # Active Search / Recognition check (cached)
+                # Check recognition cache
                 name, conf = "Unknown", 0.0
                 if track_id in recognition_cache:
                     cached_name, cached_conf, cached_frame = recognition_cache[track_id]
@@ -238,31 +265,30 @@ def process_camera(camera_id: str):
                     final_processed.append(p1)
             processed = final_processed
 
-            # Face recognition logic (periodic and non-blocking)
-            if run_recognition:
-                for t in processed:
-                    tid = t["id"]
-                    # Skip if already being processed or not due yet
-                    if tid in recognition_cache and (frame_count - recognition_cache[tid][2]) < RECOGNITION_CACHE_FRAMES:
-                        continue
-                    
-                    # Offload heavy biometric check to background thread
-                    bx1, by1, bx2, by2 = int(t["bbox"][0]), int(t["bbox"][1]), int(t["bbox"][2]), int(t["bbox"][3])
-                    bw, bh = max(0, bx2 - bx1), max(0, by2 - by1)
-                    if bw < 30 or bh < 30: continue
-                    
-                    face_box = [bx1 + int(0.15 * bw), by1, bx2 - int(0.15 * bw), by1 + int(0.45 * bh)]
-                    threading.Thread(
-                        target=self_recognition_worker,
-                        args=(frame.copy(), face_box, tid, recognition_cache, frame_count),
-                        daemon=True
-                    ).start()
+            # Face recognition logic - runs on EVERY frame (2 FPS)
+            for t in processed:
+                tid = t["id"]
+                # Skip if cache is still valid
+                if tid in recognition_cache and (frame_count - recognition_cache[tid][2]) < RECOGNITION_CACHE_FRAMES:
+                    continue
+                
+                # Offload heavy biometric check to background thread
+                bx1, by1, bx2, by2 = int(t["bbox"][0]), int(t["bbox"][1]), int(t["bbox"][2]), int(t["bbox"][3])
+                bw, bh = max(0, bx2 - bx1), max(0, by2 - by1)
+                if bw < 30 or bh < 30: continue
+                
+                face_box = [bx1 + int(0.15 * bw), by1, bx2 - int(0.15 * bw), by1 + int(0.45 * bh)]
+                threading.Thread(
+                    target=self_recognition_worker,
+                    args=(frame.copy(), face_box, tid, recognition_cache, frame_count, face_encoding_cache, track_merge_map),
+                    daemon=True
+                ).start()
 
-            # Active search check
+            # Active search check - also runs every frame
             with active_search_lock:
                 search = dict(active_search)
 
-            if search.get("running") and run_recognition:
+            if search.get("running"):
                 for t in processed:
                     track_key = (camera_id, t["id"])
                     if track_key not in search.get("found_track_ids", set()):
@@ -332,8 +358,26 @@ def process_camera(camera_id: str):
                 occupancy_last_count[camera_id] = people_count
                 try:
                     db_manager.log_occupancy(camera_id, people_count)
-                except Exception:
-                    pass
+                    
+                    # Save snapshot with bounding boxes when count changes
+                    if people_count > 0:
+                        snapshot_dir = f"snapshots/{camera_id}"
+                        os.makedirs(snapshot_dir, exist_ok=True)
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        snapshot_path = f"{snapshot_dir}/snapshot_{timestamp}.jpg"
+                        
+                        # Save bbox data as JSON
+                        import json
+                        bbox_data = json.dumps([{
+                            "id": t["id"],
+                            "bbox": t["bbox"],
+                            "name": t["name"]
+                        } for t in processed])
+                        
+                        cv2.imwrite(snapshot_path, record_frame)
+                        db_manager.log_detection_snapshot(camera_id, people_count, snapshot_path, bbox_data)
+                except Exception as e:
+                    print(f"[Camera:{camera_id}] Snapshot error: {e}")
             
             # Display count - only currently detected persons
             count_text = f"Persons: {people_count}"
@@ -343,6 +387,14 @@ def process_camera(camera_id: str):
             # Output at full frame rate
             with results_lock:
                 camera_results[camera_id] = {"rendered_frame": record_frame, "frame_id": frame_id, "tracks": processed}
+            
+            # Store recognized persons for API
+            with recognized_lock:
+                recognized_dict = {}
+                for t in processed:
+                    if t["name"] != "Unknown":
+                        recognized_dict[t["id"]] = t["name"]
+                camera_recognized_persons[camera_id] = recognized_dict
 
             # Write to recording
             with writer_lock:
@@ -350,22 +402,36 @@ def process_camera(camera_id: str):
                 if writer_data and writer_data.get("writer"):
                     writer_data["writer"].write(record_frame)
             
-            # Frame rate control for smooth 30 FPS output
-            elapsed = time.time() - loop_start
-            sleep_time = process_interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            # No frame rate limiting - run as fast as possible for smooth video
 
         except Exception as e:
-            print(f"[process_camera:{camera_id}] {e}")
+            print(f"[Camera:{camera_id}] Error: {e}")
             import traceback; traceback.print_exc()
 
 
-def self_recognition_worker(frame, face_box, track_id, recognition_cache, frame_count):
-    """Background task for periodic biometric verification."""
+def self_recognition_worker(frame, face_box, track_id, recognition_cache, frame_count, face_encoding_cache, track_merge_map):
+    """Background task for periodic biometric verification with deduplication."""
     try:
-        name, conf = recognizer.recognize(frame, face_box)
-        if name != "Unknown" and conf > 0.35:
+        name, conf, face_encoding = recognizer.recognize_with_encoding(frame, face_box)
+        
+        # Store face encoding for deduplication
+        if face_encoding is not None:
+            face_encoding_cache[track_id] = face_encoding
+            
+            # Check for duplicate tracks (same person, different track ID)
+            for other_id, other_encoding in face_encoding_cache.items():
+                if other_id != track_id:
+                    # Compare face encodings
+                    distance = np.linalg.norm(face_encoding - other_encoding)
+                    if distance < 0.6:  # Same person
+                        # Merge tracks - use lower ID
+                        if track_id < other_id:
+                            track_merge_map[other_id] = track_id
+                        else:
+                            track_merge_map[track_id] = other_id
+                        break
+        
+        if name != "Unknown" and conf > 0.40:  # Higher confidence threshold
             recognition_cache[track_id] = (name, conf, frame_count)
     except Exception:
         pass
@@ -417,36 +483,67 @@ def recognition_worker(frame, face_bbox, track_id, camera_id, recognition_cache)
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    # Paginated feeds
-    try:
-        page = int(request.query_params.get("page", "1"))
-        per_page = int(request.query_params.get("per_page", "4"))
-    except Exception:
-        page, per_page = 1, 4
-    cameras_all = camera_manager.get_active_cameras()
-    total = len(cameras_all)
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    start = (page - 1) * per_page
-    end = start + per_page
-    cameras = cameras_all[start:end]
-    return templates.TemplateResponse(request, "index.html", {"cameras": cameras, "page": page, "total_pages": total_pages, "per_page": per_page, "total": total})
+    # Check authentication
+    if not require_auth(request):
+        return RedirectResponse(url="/login", status_code=302)
+    # New dynamic camera grid - cameras loaded via JavaScript
+    return templates.TemplateResponse(request, "index.html", {})
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    return templates.TemplateResponse(request, "login.html", {})
+
+@app.post("/api/login")
+async def api_login(request: Request, username: str = Form(...), password: str = Form(...)):
+    """Handle login form submission."""
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        import uuid
+        session_token = str(uuid.uuid4())
+        authenticated_sessions.add(session_token)
+        response = RedirectResponse(url="/", status_code=302)
+        response.set_cookie(key="session", value=session_token, httponly=True)
+        return response
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+@app.get("/logout")
+async def logout(request: Request):
+    """Logout and clear session."""
+    session_token = request.cookies.get("session")
+    if session_token and session_token in authenticated_sessions:
+        authenticated_sessions.discard(session_token)
+    response = RedirectResponse(url="/login", status_code=302)
+    response.delete_cookie("session")
+    return response
 
 
 @app.get("/search", response_class=HTMLResponse)
 async def search_page(request: Request):
+    if not require_auth(request):
+        return RedirectResponse(url="/login", status_code=302)
     return templates.TemplateResponse(request, "search.html", {})
 
 @app.get("/recordings_page", response_class=HTMLResponse)
 async def recordings_page(request: Request):
+    if not require_auth(request):
+        return RedirectResponse(url="/login", status_code=302)
     return templates.TemplateResponse(request, "recordings.html", {})
+
+@app.get("/detection_logs", response_class=HTMLResponse)
+async def detection_logs_page(request: Request, camera_id: Optional[str] = None):
+    if not require_auth(request):
+        return RedirectResponse(url="/login", status_code=302)
+    return templates.TemplateResponse(request, "detection_logs.html", {"camera_id": camera_id})
 
 @app.get("/people", response_class=HTMLResponse)
 async def people_page(request: Request):
+    if not require_auth(request):
+        return RedirectResponse(url="/login", status_code=302)
     return templates.TemplateResponse(request, "people.html", {})
 
 @app.get("/cameras", response_class=HTMLResponse)
 async def cameras_page(request: Request):
+    if not require_auth(request):
+        return RedirectResponse(url="/login", status_code=302)
     return templates.TemplateResponse(request, "cameras.html", {})
 @app.post("/register")
 async def register_person(name: str = Form(...), file: UploadFile = File(...)):
@@ -503,10 +600,48 @@ async def delete_camera(camera_id: str = Form(...)):
 
 @app.get("/api/cameras")
 async def api_cameras():
-    return camera_manager.get_active_cameras()
+    """Get all active cameras with their source info."""
+    cameras = []
+    for cam_id in camera_manager.get_active_cameras():
+        # Get camera source from database
+        cam_info = {"id": cam_id, "source": "Unknown"}
+        try:
+            db_cams = db_manager.get_cameras()
+            for db_cam in db_cams:
+                if db_cam[0] == cam_id:
+                    cam_info["source"] = db_cam[1] if len(db_cam) > 1 else "Local"
+                    break
+        except:
+            pass
+        cameras.append(cam_info)
+    return cameras
+
+@app.get("/api/recognized/{camera_id}")
+async def api_recognized_persons(camera_id: str):
+    """Get recognized persons for a specific camera."""
+    with recognized_lock:
+        persons = camera_recognized_persons.get(camera_id, {})
+        return [{"track_id": tid, "name": name} for tid, name in persons.items()]
 
 @app.get("/api/occupancy")
 async def api_occupancy(camera_id: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None):
+    """Get occupancy data - either current counts or historical."""
+    # If no time range specified, return current live counts
+    if not start_time and not end_time:
+        results = []
+        for cam_id in camera_manager.get_active_cameras():
+            if camera_id and cam_id != camera_id:
+                continue
+            count = occupancy_last_count.get(cam_id, 0)
+            results.append({
+                "id": cam_id,
+                "camera_id": cam_id,
+                "timestamp": int(time.time()),
+                "count": count
+            })
+        return results
+    
+    # Historical data query
     rows = db_manager.search_occupancy(camera_id, start_time, end_time)
     return [{"id": r[0], "camera_id": r[1], "timestamp": r[2], "count": r[3]} for r in rows]
 
@@ -687,6 +822,95 @@ async def delete_recording(record_id: int):
         db_manager.delete_recording(record_id)
     return {"status": "success"}
 
+# ---------------------------------------------------------------------------
+# Camera Recording Settings API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/camera_settings/{camera_id}")
+async def get_camera_settings(camera_id: str):
+    """Get recording settings for a camera."""
+    db_setting = db_manager.get_camera_recording_setting(camera_id)
+    # Also check if actually recording
+    with writer_lock:
+        actually_recording = camera_id in camera_writers
+    return {"camera_id": camera_id, "recording_enabled": bool(db_setting), "actually_recording": actually_recording}
+
+@app.post("/api/camera_settings/{camera_id}")
+async def set_camera_settings(camera_id: str, enabled: bool = Form(...)):
+    """Set recording settings for a camera and start/stop actual recording."""
+    # Save setting to database
+    db_manager.set_camera_recording(camera_id, enabled)
+    
+    # Actually start/stop the recording
+    with writer_lock:
+        if enabled:
+            # Start recording if not already recording
+            if camera_id not in camera_writers:
+                # Get frame dimensions from camera results
+                with results_lock:
+                    data = camera_results.get(camera_id, {})
+                    frame = data.get("rendered_frame")
+                    if frame is None:
+                        return {"status": "error", "message": "Camera not streaming"}
+                    h, w = frame.shape[:2]
+                
+                # Setup video writer
+                os.makedirs("recordings", exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                file_path = f"recordings/{camera_id}_{timestamp}.mp4"
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                writer = cv2.VideoWriter(file_path, fourcc, 2.0, (w, h))  # 2 FPS to match processing
+                
+                if writer.isOpened():
+                    db_id = db_manager.start_recording(camera_id, file_path)
+                    camera_writers[camera_id] = {"writer": writer, "db_id": db_id}
+                    print(f"[Recording] Started recording {camera_id} to {file_path}")
+                else:
+                    return {"status": "error", "message": "Failed to start video writer"}
+        else:
+            # Stop recording if currently recording
+            if camera_id in camera_writers:
+                writer_data = camera_writers.pop(camera_id)
+                writer_data["writer"].release()
+                db_manager.end_recording(writer_data["db_id"])
+                print(f"[Recording] Stopped recording {camera_id}")
+    
+    return {"status": "success", "camera_id": camera_id, "recording_enabled": enabled}
+
+# ---------------------------------------------------------------------------
+# Detection Snapshots API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/detection_snapshots")
+async def get_detection_snapshots(camera_id: Optional[str] = None, limit: int = 100):
+    """Get detection snapshots with bounding boxes."""
+    snapshots = db_manager.get_detection_snapshots(camera_id=camera_id, limit=limit)
+    return [
+        {
+            "id": s[0],
+            "camera_id": s[1],
+            "timestamp": s[2],
+            "person_count": s[3],
+            "snapshot_path": s[4],
+            "bbox_data": s[5]
+        }
+        for s in snapshots
+    ]
+
+@app.get("/api/snapshot/{snapshot_id}")
+async def get_snapshot(snapshot_id: int):
+    """Get a specific snapshot with bounding box data."""
+    snapshot = db_manager.get_snapshot(snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return {
+        "id": snapshot[0],
+        "camera_id": snapshot[1],
+        "timestamp": snapshot[2],
+        "person_count": snapshot[3],
+        "snapshot_path": snapshot[4],
+        "bbox_data": snapshot[5]
+    }
 
 # ---------------------------------------------------------------------------
 # Video Person Search API
@@ -937,72 +1161,47 @@ async def search_video_by_image(file: UploadFile = File(...), video_ids: str = F
 # ---------------------------------------------------------------------------
 
 def gen_frames(camera_id: str):
-    """Generate smooth MJPEG stream for live viewing."""
+    """Generate MJPEG stream at 2 FPS matching processing rate."""
     import cv2
     import time
     
     last_sent_id = -1
     last_send_time = 0
-    target_fps = 30  # Target 30 FPS for smooth viewing
-    min_frame_interval = 1.0 / target_fps
-    
-    # Frame skip counter for smoother streaming under load
-    consecutive_drops = 0
-    max_consecutive_drops = 3
+    FRAME_INTERVAL = 0.5  # 2 FPS to match processing
     
     while True:
-        loop_start = time.time()
-        
         with results_lock:
             data = camera_results.get(camera_id, {})
             frame = data.get("rendered_frame")
             frame_id = data.get("frame_id", -1)
         
-        # Skip if no new frame
+        # Skip if no frame
         if frame is None:
-            time.sleep(0.001)
-            continue
-            
-        # Adaptive frame skipping: if we're falling behind, skip some frames
-        if frame_id == last_sent_id:
-            # No new frame yet, check if we should wait or continue
-            elapsed = time.time() - last_send_time
-            if elapsed < min_frame_interval:
-                time.sleep(max(0.001, min_frame_interval - elapsed))
+            time.sleep(0.05)
             continue
         
-        # Check if we're getting frames too fast (adaptive throttling)
-        time_since_last = time.time() - last_send_time
-        if time_since_last < min_frame_interval and consecutive_drops < max_consecutive_drops:
-            # Skip this frame to maintain target FPS
-            consecutive_drops += 1
-            last_sent_id = frame_id
+        # Rate limit to 2 FPS
+        current_time = time.time()
+        if current_time - last_send_time < FRAME_INTERVAL:
+            time.sleep(0.05)
             continue
         
-        consecutive_drops = 0
+        # Send latest frame even if not new (maintains 2 FPS stream)
         last_sent_id = frame_id
-        last_send_time = time.time()
+        last_send_time = current_time
 
-        # -------------------------------------------------------------------
-        # SMOOTH STREAMING OPTIMIZATION
-        # Balance quality vs latency for buttery smooth 30 FPS
-        # -------------------------------------------------------------------
+        # Resize for streaming
         h, w = frame.shape[:2]
-        
-        # Use 720p for good quality with smooth streaming
         target_w = 1280
         if w > target_w:
             scale = target_w / w
             target_h = int(h * scale)
-            # Use faster interpolation for streaming
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
-        # Optimize JPEG encoding for speed
-        # Quality 60 gives good visual quality with smaller size
+        # JPEG encoding
         encode_params = [
-            cv2.IMWRITE_JPEG_QUALITY, 60,
-            cv2.IMWRITE_JPEG_OPTIMIZE, 1,
-            cv2.IMWRITE_JPEG_PROGRESSIVE, 0  # Disable progressive for lower latency
+            cv2.IMWRITE_JPEG_QUALITY, 75,
+            cv2.IMWRITE_JPEG_OPTIMIZE, 0,
         ]
         
         ret, buffer = cv2.imencode(".jpg", frame, encode_params)
@@ -1011,17 +1210,10 @@ def gen_frames(camera_id: str):
             
         frame_bytes = buffer.tobytes()
         
-        # Yield the frame with proper MIME boundaries
         yield (b"--frame\r\n"
                b"Content-Type: image/jpeg\r\n"
                b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n"
                b"\r\n" + frame_bytes + b"\r\n")
-        
-        # Ensure we don't exceed target FPS
-        elapsed = time.time() - loop_start
-        sleep_time = min_frame_interval - elapsed
-        if sleep_time > 0:
-            time.sleep(sleep_time)
 
 
 @app.get("/video_feed/{camera_id}")

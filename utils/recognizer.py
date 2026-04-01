@@ -32,8 +32,16 @@ class FaceRecognizer:
         frame: full color frame
         face_bbox: [x1, y1, x2, y2] tight face bounding box
         """
+        name, conf, _ = self.recognize_with_encoding(frame, face_bbox)
+        return name, conf
+
+    def recognize_with_encoding(self, frame, face_bbox):
+        """
+        Recognize face and return encoding for deduplication.
+        Returns: (name, confidence, face_encoding)
+        """
         if not face_bbox:
-            return "Unknown", 0.0
+            return "Unknown", 0.0, None
 
         fx1, fy1, fx2, fy2 = face_bbox
         face_crop = frame[max(0, fy1):max(0, fy2), max(0, fx1):max(0, fx2)]
@@ -54,14 +62,18 @@ class FaceRecognizer:
                 encodings_arr = np.array(self.known_face_encodings)
                 distances = np.linalg.norm(encodings_arr - embedding, axis=1)
                 min_idx = np.argmin(distances)
-                # Lowered threshold to 1.15 for better side/profile face detection
-                # Original was 1.0, increased to catch more angles
-                if distances[min_idx] < 1.15:
+                # Stricter threshold for better accuracy
+                if distances[min_idx] < 1.0:
                     name = self.known_face_names[min_idx]
                     confidence = 1 - (distances[min_idx] / 2.0)
-                    return name, float(confidence)
+                    return name, float(confidence), embedding
+                else:
+                    # Return encoding even if not recognized
+                    return "Unknown", 0.0, embedding
+            else:
+                return "Unknown", 0.0, embedding
                 
-        return "Unknown", 0.0
+        return "Unknown", 0.0, None
 
     def get_encoding(self, image):
         """
